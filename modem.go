@@ -581,8 +581,6 @@ func unpackBits(in []byte) []Bit {
 	return bits
 }
 func (m *CC1200Modem) StartTX() error {
-	m.trxMutex.Lock()
-	defer m.trxMutex.Unlock()
 	log.Printf("[DEBUG] StartTX()")
 	err := m.command([]byte{cmdSetTXStart, 2})
 	if err != nil {
@@ -592,23 +590,27 @@ func (m *CC1200Modem) StartTX() error {
 	if err != nil {
 		log.Printf("[DEBUG] Start TX PAEnable: %v", err)
 	}
+	m.trxMutex.Lock()
 	m.trxState = trxTX
+	m.trxMutex.Unlock()
 	return nil
 }
 
 func (m *CC1200Modem) StopTX() {
 	m.trxMutex.Lock()
-	defer m.trxMutex.Unlock()
 	// Only stop if we've started
 	if m.trxState == trxRX {
+		m.trxMutex.Unlock()
 
 		log.Print("[DEBUG] modem StopTX()")
 		err := m.setPAEnableGPIO(false)
 		if err != nil {
 			log.Printf("[DEBUG] End TX PAEnable: %v", err)
 		}
+		m.trxMutex.Lock()
 		m.trxState = trxIdle
 	}
+	m.trxMutex.Unlock()
 }
 
 func (m *CC1200Modem) SetTXFreq(freq uint32) error {
@@ -641,10 +643,10 @@ func (m *CC1200Modem) SetTXPower(dbm float32) error {
 }
 
 func (m *CC1200Modem) StartRX() error {
-	m.trxMutex.Lock()
-	defer m.trxMutex.Unlock()
 	log.Printf("[DEBUG] StartRX()")
+	m.trxMutex.Lock()
 	m.trxState = trxRX
+	m.trxMutex.Unlock()
 	m.clearResponseBuf()
 	var err error
 	cmd := []byte{cmdSetRX, 0, 1}
@@ -657,9 +659,9 @@ func (m *CC1200Modem) StartRX() error {
 
 func (m *CC1200Modem) StopRX() error {
 	m.trxMutex.Lock()
-	defer m.trxMutex.Unlock()
 	// Only stop if we've started
 	if m.trxState == trxRX {
+		m.trxMutex.Unlock()
 		log.Printf("[DEBUG] StopRX()")
 		var err error
 		cmd := []byte{cmdSetRX, 0, 0}
@@ -669,8 +671,10 @@ func (m *CC1200Modem) StopRX() error {
 			return fmt.Errorf("send set RX stop: %w", err)
 		}
 		m.clearResponseBuf()
+		m.trxMutex.Lock()
 		m.trxState = trxIdle
 	}
+	m.trxMutex.Unlock()
 	return nil
 }
 func (m *CC1200Modem) SetRXFreq(freq uint32) error {
