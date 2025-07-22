@@ -308,7 +308,7 @@ func NewGateway(cfg config, modem m17.Modem) (*Gateway, error) {
 		return nil, fmt.Errorf("error connecting to %s:%d %s: %v", g.Server, g.Port, g.Module, err)
 	}
 
-	modem.StartRX()
+	modem.Start()
 
 	return &g, nil
 }
