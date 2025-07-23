@@ -342,7 +342,7 @@ func (d *Decoder) decodeStreamFrame(pld []Symbol) (frameData []byte, lich []byte
 	//shift 1+2 positions left - get rid of the encoded flushing bits and FN
 	frameData = frameData[1+2:]
 
-	return frameData, lich, fn, lichCnt, e / softTrue
+	return frameData, lich, fn, lichCnt, e
 }
 
 func (d *Decoder) decodePacketFrame(pld []Symbol) ([]byte, float64) {
@@ -365,7 +365,7 @@ func (d *Decoder) decodePacketFrame(pld []Symbol) ([]byte, float64) {
 	pkt, e := vd.DecodePunctured(dSoftBit, PacketPuncturePattern)
 	// log.Printf("[DEBUG] pkt: %#v", pkt)
 
-	return pkt[1:], e / softTrue
+	return pkt[1:], e
 }
 
 func calcSoftbits(pld []Symbol) []SoftBit {
