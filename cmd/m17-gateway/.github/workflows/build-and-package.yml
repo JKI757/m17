@@ -1,0 +1,103 @@
+name: Build and Package
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+      # with:
+      #   fetch-depth: 0
+    
+    - name: Set up Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.24.x'
+    
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y dpkg-dev
+    
+    - name: Get version
+      id: version
+      run: |
+        if [[ $GITHUB_REF == refs/tags/* ]]; then
+          VERSION=${GITHUB_REF#refs/tags/v}
+        else
+          VERSION="0.0.0-dev.${GITHUB_SHA::8}"
+        fi
+        echo "VERSION=$VERSION" >> $GITHUB_OUTPUT
+        echo "Building version: $VERSION"
+    
+    - name: Download dependencies
+      run: go mod download
+    
+    - name: Run tests
+      run: go test ./...
+    
+    - name: Build for Raspberry Pi (ARM64)
+      run: |
+        echo "Building M17 Gateway for ARM64 architecture (64-bit Raspberry Pi OS)..."
+        GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -o m17-gateway .
+        echo "Build completed successfully"
+        ls -la m17-gateway
+        file m17-gateway
+    
+    - name: Make build script executable
+      run: chmod +x scripts/build-deb.sh
+    
+    - name: Build .deb package
+      run: ./scripts/build-deb.sh ${{ steps.version.outputs.VERSION }}
+    
+    - name: List build artifacts
+      run: ls -la build/
+    
+    - name: Upload .deb package
+      uses: actions/upload-artifact@v3
+      with:
+        name: debian-package
+        path: build/*.deb
+    
+    - name: Create Release
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: build/*.deb
+        generate_release_notes: true
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Download .deb package
+      uses: actions/download-artifact@v3
+      with:
+        name: debian-package
+        path: ./
+    
+    - name: Test package info
+      run: |
+        # Install dpkg tools
+        sudo apt-get update
+        sudo apt-get install -y dpkg-dev
+        
+        # Check package info
+        DEB_FILE=$(ls *.deb)
+        echo "Package contents:"
+        dpkg -c "$DEB_FILE"
+        
+        echo "Package info:"
+        dpkg -I "$DEB_FILE"
