@@ -15,9 +15,9 @@ Duplex=false
 
 [Reflector]
 Name=M17-M17
-Address=ref.m17.link
+Address=m17.openquad.net
 Port=17000
-Module=P
+Module=C
 
 [Log]
 # Logging levels: ERROR, INFO, DEBUG
