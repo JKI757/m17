@@ -46,7 +46,7 @@ const (
 	trxTX
 )
 
-// const txEndDuration = 400 * time.Millisecond
+const txTimeout = 200 * time.Millisecond
 
 type Line interface {
 	SetValue(value int) error
@@ -59,9 +59,9 @@ type CC1200Modem struct {
 	// txSymbols chan float32
 	s2s SymbolToSample
 
-	trxMutex sync.Mutex
-	trxState int
-	// lastSend  time.Time
+	trxMutex  sync.Mutex
+	trxState  int
+	txTimer   *time.Timer
 	cmdSource chan byte
 	nRST      Line
 	paEnable  Line
@@ -80,6 +80,9 @@ func NewCC1200Modem(
 		s2s:       NewSymbolToSample(rrcTaps5, TXSymbolScalingCoeff*transmitGain, false, 5),
 		cmdSource: make(chan byte),
 	}
+	ret.txTimer = time.AfterFunc(txTimeout, ret.stopTX)
+	// Stop it until we transmit
+	ret.txTimer.Stop()
 	ret.trxState = trxIdle
 	var err error
 	fi, err := os.Stat(port)
@@ -386,6 +389,7 @@ func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
 		}
 	} else {
 		m.trxMutex.Unlock()
+		m.txTimer.Reset(txTimeout)
 		log.Printf("[DEBUG] Sending frame of stream %x, fn %d", sd.StreamID, sd.FrameNumber)
 		syms, err := generateStreamSymbols(sd)
 		if err != nil {
@@ -465,7 +469,7 @@ func unpackBits(in []byte) []Bit {
 	return bits
 }
 func (m *CC1200Modem) startTX() error {
-	log.Printf("[DEBUG] StartTX()")
+	log.Printf("[DEBUG] startTX()")
 	err := m.command([]byte{cmdSetTXStart, 2})
 	if err != nil {
 		return fmt.Errorf("start TX: %w", err)
@@ -477,16 +481,17 @@ func (m *CC1200Modem) startTX() error {
 	m.trxMutex.Lock()
 	m.trxState = trxTX
 	m.trxMutex.Unlock()
+	m.txTimer.Reset(txTimeout)
 	return nil
 }
 
 func (m *CC1200Modem) stopTX() {
+	log.Print("[DEBUG] modem stopTX()")
 	m.trxMutex.Lock()
 	// Only stop if we've started
-	if m.trxState == trxRX {
+	if m.trxState == trxTX {
 		m.trxMutex.Unlock()
-
-		log.Print("[DEBUG] modem StopTX()")
+		log.Print("[DEBUG] modem stopping TX")
 		err := m.setPAEnableGPIO(false)
 		if err != nil {
 			log.Printf("[DEBUG] End TX PAEnable: %v", err)
@@ -495,6 +500,7 @@ func (m *CC1200Modem) stopTX() {
 		m.trxState = trxIdle
 	}
 	m.trxMutex.Unlock()
+	m.txTimer.Stop()
 }
 
 func (m *CC1200Modem) SetTXFreq(freq uint32) error {
@@ -528,6 +534,8 @@ func (m *CC1200Modem) SetTXPower(dbm float32) error {
 
 func (m *CC1200Modem) Start() error {
 	log.Printf("[DEBUG] Start()")
+	// Sometimes we don't go into RX, so try stopping first
+	// m.stopRX()
 	m.trxMutex.Lock()
 	m.trxState = trxRX
 	m.trxMutex.Unlock()
@@ -546,7 +554,7 @@ func (m *CC1200Modem) stopRX() error {
 	// Only stop if we've started
 	if m.trxState == trxRX {
 		m.trxMutex.Unlock()
-		log.Printf("[DEBUG] StopRX()")
+		log.Printf("[DEBUG] stopRX()")
 		var err error
 		cmd := []byte{cmdSetRX, 0, 0}
 		// Theoretically this returns a response, but how to find it in the received data
