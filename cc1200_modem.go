@@ -75,12 +75,16 @@ func NewCC1200Modem(
 	paEnablePin int,
 	boot0Pin int,
 	baudRate int) (*CC1200Modem, error) {
-	ret := CC1200Modem{
+	ret := &CC1200Modem{
 		rxSymbols: make(chan float32),
 		s2s:       NewSymbolToSample(rrcTaps5, TXSymbolScalingCoeff*transmitGain, false, 5),
 		cmdSource: make(chan byte),
 	}
-	ret.txTimer = time.AfterFunc(txTimeout, ret.stopTX)
+	ret.txTimer = time.AfterFunc(txTimeout, func() {
+		log.Printf("[DEBUG] TX timeout")
+		ret.stopTX()
+		ret.Start()
+	})
 	// Stop it until we transmit
 	ret.txTimer.Stop()
 	ret.trxState = trxIdle
@@ -131,7 +135,7 @@ func NewCC1200Modem(
 	// } else {
 	// 	log.Printf("[DEBUG] Opened debug log: %v", ret.debugLog)
 	// }
-	return &ret, nil
+	return ret, nil
 }
 
 func (m *CC1200Modem) processReceivedData(rxSource chan int8) {
