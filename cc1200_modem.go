@@ -46,7 +46,9 @@ const (
 	trxTX
 )
 
-const txTimeout = 200 * time.Millisecond
+// txTimeout must be greater than this!
+const txVoiceStreamWait = 10 * 40 * time.Millisecond
+const txTimeout = txVoiceStreamWait + 80*time.Millisecond
 
 type Line interface {
 	SetValue(value int) error
@@ -393,7 +395,6 @@ func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
 		}
 	} else {
 		m.trxMutex.Unlock()
-		m.txTimer.Reset(txTimeout)
 		log.Printf("[DEBUG] Sending frame of stream %x, fn %d", sd.StreamID, sd.FrameNumber)
 		syms, err := generateStreamSymbols(sd)
 		if err != nil {
@@ -404,6 +405,7 @@ func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
 			return fmt.Errorf("failed to send stream frame: %w", err)
 		}
 	}
+	m.txTimer.Reset(txTimeout)
 	if sd.LastFrame {
 		// send EOT
 		log.Printf("[DEBUG] Sending EOT for stream %x, fn %d", sd.StreamID, sd.FrameNumber)
@@ -413,7 +415,8 @@ func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
 			return fmt.Errorf("failed to send EOT: %w", err)
 		}
 		log.Printf("[DEBUG] Finished TransmitVoiceStream")
-		time.Sleep(10 * 40 * time.Millisecond)
+		m.txTimer.Reset(txTimeout)
+		time.Sleep(txVoiceStreamWait)
 		log.Printf("[DEBUG] Finished TransmitVoiceStream wait")
 		m.stopTX()
 		m.Start()
