@@ -363,10 +363,13 @@ func (v *ViterbiDecoder) DecodePunctured(puncturedSoftBits []SoftBit, puncturePa
 	}
 	softBits = softBits[:u+u%2]
 
-	out, e := v.decode(softBits)
+	out, de := v.decode(softBits)
 	// log.Printf("[DEBUG] out: %#v, vd: %#v", out, e-float64(u-len(puncturedSoftBits))*0.5)
 	// viterbi_decode(out, umsg, u) - (u-in_len)*0x7FFF;
-	return out, float64(e-uint32(u-len(puncturedSoftBits))*softMaybe) / softTrue
+	e := de - uint32(u-len(puncturedSoftBits))*softMaybe
+	// e/0xFFFFU/SYM_PER_PLD/2.0f*100.0f)
+	mer := float64(e) / softTrue / SymbolsPerPayload / 2 * 100
+	return out, mer
 }
 
 func (v *ViterbiDecoder) decode(softBits []SoftBit) ([]byte, uint32) {

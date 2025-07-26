@@ -98,7 +98,8 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 				// 	// Was logged in extractPayload
 			}
 			d.gotLSF = false
-			d.lsf = decodeLSF(pld)
+			var e float64
+			d.lsf, e = decodeLSF(pld)
 			log.Printf("[DEBUG] Received RF LSF: %s", d.lsf)
 			if d.lsf.CheckCRC() {
 				d.gotLSF = true
@@ -113,7 +114,7 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 					d.streamID = uint16(rand.Intn(0x10000))
 					sendToNetwork(d.lsf, nil, d.streamID, d.streamFN)
 					if d.dashLog != nil {
-						d.dashLog.Info("", "type", "RF", "subtype", "Voice Start", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN())
+						d.dashLog.Info("", "type", "RF", "subtype", "Voice Start", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", e)
 					}
 				} else { // packet mode
 					d.syncedType = PacketSync
@@ -145,9 +146,9 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 
 			log.Printf("[DEBUG] pktFrame[25]: %b, frameNumOrByteCnt: %d, last: %v", pktFrame[25], frameNumOrByteCnt, lastFrame)
 			if lastFrame {
-				log.Printf("[DEBUG] Frame %d Viterbi error: %1.1f", d.lastPacketFN+1, e)
+				log.Printf("[DEBUG] Frame %d MER: %1.1f", d.lastPacketFN+1, e)
 			} else {
-				log.Printf("[DEBUG] Frame %d Viterbi error: %1.1f", frameNumOrByteCnt, e)
+				log.Printf("[DEBUG] Frame %d MER: %1.1f", frameNumOrByteCnt, e)
 			}
 			// log.Printf("[DEBUG] frameData: % x %s", pktFrame, pktFrame)
 
@@ -164,7 +165,7 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 					// log.Printf("[DEBUG] d.lsf: %v, d.packetData: %v", d.lsf, d.packetData)
 					sendToNetwork(d.lsf, d.packetData, 0, 0)
 					if d.dashLog != nil {
-						d.dashLog.Info("", "type", "RF", "subtype", "Packet", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN())
+						d.dashLog.Info("", "type", "RF", "subtype", "Packet", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", e)
 					}
 				} else {
 					log.Printf("[DEBUG] Bad CRC not forwarded: %x", CRC(d.packetData))
@@ -182,10 +183,10 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 			}
 			var lich []byte
 			var lichCnt byte
-			var vd float64
+			var e float64
 			var fn uint16
-			d.frameData, lich, fn, lichCnt, vd = d.decodeStreamFrame(pld)
-			log.Printf("[DEBUG] frameData: [% 2x], lich: %x, lichCnt: %d, fn: %x, vd: %1.1f", d.frameData, lich, lichCnt, fn, vd)
+			d.frameData, lich, fn, lichCnt, e = d.decodeStreamFrame(pld)
+			log.Printf("[DEBUG] frameData: [% 2x], lich: %x, lichCnt: %d, fn: %x, vd: %1.1f", d.frameData, lich, lichCnt, fn, e)
 
 			if d.lastStreamFN != int(fn) {
 				if d.lichParts != 0x3F && lichCnt < 6 { //6 chunks = 0b111111
@@ -207,7 +208,7 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 						}
 					}
 				}
-				log.Printf("[DEBUG] Received stream frame: FN:%04X, LICH_CNT:%d, Viterbi error: %1.1f", fn, lichCnt, vd)
+				log.Printf("[DEBUG] Received stream frame: FN:%04X, LICH_CNT:%d, MER: %1.1f", fn, lichCnt, e)
 				if d.gotLSF {
 					// log.Printf("[DEBUG] Sending stream frame")
 					// Not sure why we have to flip the bytes here
@@ -216,7 +217,7 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 					d.timeoutCnt = 0
 					// This doesn't work because the high bit is never set in actual frams received from my CS7000
 					if d.dashLog != nil && fn&0x8000 == 0x8000 {
-						d.dashLog.Info("", "type", "RF", "subtype", "Voice End", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN())
+						d.dashLog.Info("", "type", "RF", "subtype", "Voice End", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", e)
 					}
 				}
 				d.lastStreamFN = int(fn)
@@ -277,7 +278,7 @@ func (d *Decoder) extractPayload(dist float32, typ uint16, symbols []Symbol) ([]
 	return symbols, pld, dist, nil
 }
 
-func decodeLSF(pld []Symbol) *LSF {
+func decodeLSF(pld []Symbol) (*LSF, float64) {
 	// log.Printf("[DEBUG] decodeLSF: len(pld): %d", len(pld))
 	softBit := calcSoftbits(pld)
 	// log.Printf("[DEBUG] softBit: %#v", softBit)
@@ -311,9 +312,9 @@ func decodeLSF(pld []Symbol) *LSF {
 		}
 		log.Printf("[DEBUG] dest: %s, src: %s", dst, src)
 	}
-	log.Printf("[DEBUG] LSF Viterbi error: %1.1f", e/softTrue)
+	log.Printf("[DEBUG] LSF MER: %1.1f", e/softTrue)
 	l := NewLSFFromBytes(lsf)
-	return &l
+	return &l, e
 }
 
 func (d *Decoder) decodeStreamFrame(pld []Symbol) (frameData []byte, lich []byte, fn uint16, lichCnt byte, e float64) {

@@ -17,7 +17,7 @@ StandardError=journal
 # Security settings
 NoNewPrivileges=yes
 PrivateTmp=yes
-ProtectSystem=strict
+ProtectSystem=full
 ProtectHome=yes
 
 [Install]
