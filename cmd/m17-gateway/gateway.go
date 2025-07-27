@@ -17,28 +17,28 @@ import (
 )
 
 type config struct {
-	callsign        string
-	dashboardLogger *slog.Logger
-	duplex          bool
-	rxFrequency     uint32
-	txFrequency     uint32
-	power           float32
-	afc             bool
-	frequencyCorr   int16
-	reflectorName   string
-	reflectorAddr   string
-	reflectorPort   uint
-	reflectorModule string
-	logLevel        string
-	logPath         string
-	logRoot         string
-	modemPort       string
-	modemSpeed      int
-	nRSTPin         int
-	paEnablePin     int
-	boot0Pin        int
-	symbolsIn       *os.File
-	symbolsOut      *os.File
+	callsign         string
+	dashboardLogger  *slog.Logger
+	duplex           bool
+	rxFrequency      uint32
+	txFrequency      uint32
+	power            float32
+	afc              bool
+	frequencyCorr    int16
+	defaultReflector string
+	defaultModule    string
+	logLevel         string
+	logPath          string
+	logRoot          string
+	modemPort        string
+	modemSpeed       int
+	nRSTPin          int
+	paEnablePin      int
+	boot0Pin         int
+	symbolsIn        *os.File
+	symbolsOut       *os.File
+	hostfile         *m17.Hostfile
+	overrideHostfile *m17.Hostfile
 }
 
 func loadConfig(iniFile string, inFile string, outFile string) (config, error) {
@@ -55,9 +55,10 @@ func loadConfig(iniFile string, inFile string, outFile string) (config, error) {
 	afc, afcErr := cfg.Section("Radio").Key("AFC").Bool()
 	frequencyCorr, frequencyCorrErr := cfg.Section("Radio").Key("FrequencyCorr").Int()
 	duplex, duplexErr := cfg.Section("Radio").Key("Duplex").Bool()
+
+	hostFile := cfg.Section("Reflector").Key("HostFile").String()
+	overrideHostFile := cfg.Section("Reflector").Key("OverrideHostFile").String()
 	reflectorName := cfg.Section("Reflector").Key("Name").String()
-	reflectorAddr := cfg.Section("Reflector").Key("Address").String()
-	reflectorPort := cfg.Section("Reflector").Key("Port").MustUint(17000)
 	reflectorModule := cfg.Section("Reflector").Key("Module").String()
 	logLevel := cfg.Section("Log").Key("Level").String()
 	logPath := cfg.Section("Log").Key("Path").String()
@@ -85,9 +86,14 @@ func loadConfig(iniFile string, inFile string, outFile string) (config, error) {
 			powerErr = fmt.Errorf("configured Power %f out of range (-16 to 14 dBm)", power)
 		}
 	}
-	var reflectorAddrErr error
-	if reflectorAddr == "" {
-		reflectorAddrErr = fmt.Errorf("configured Reflector Address is empty")
+
+	var reflectorHostfile, reflectorOverrideHostfile *m17.Hostfile
+	var reflectorHostfileErr, reflectorOverrideHostfileErr error
+	if hostFile != "" {
+		reflectorHostfile, reflectorHostfileErr = m17.NewHostfile(hostFile)
+	}
+	if overrideHostFile != "" {
+		reflectorOverrideHostfile, reflectorOverrideHostfileErr = m17.NewHostfile(overrideHostFile)
 	}
 	var reflectorModuleErr error
 	if len(reflectorModule) > 1 {
@@ -141,38 +147,38 @@ func loadConfig(iniFile string, inFile string, outFile string) (config, error) {
 		paEnablePinErr,
 		boot0PinErr,
 		callsignErr,
-		reflectorAddrErr,
 		reflectorModuleErr,
-		// reflectorPortErr,
 		logLevelErr,
 		symbolsInErr,
 		symbolsOutErr,
 		dashboardLogErr,
+		reflectorHostfileErr,
+		reflectorOverrideHostfileErr,
 	)
 
 	return config{
-		callsign:        callsign,
-		duplex:          duplex,
-		rxFrequency:     uint32(rxFrequency),
-		txFrequency:     uint32(txFrequency),
-		power:           float32(power),
-		afc:             afc,
-		frequencyCorr:   int16(frequencyCorr),
-		reflectorName:   reflectorName,
-		reflectorAddr:   reflectorAddr,
-		reflectorModule: reflectorModule,
-		reflectorPort:   reflectorPort,
-		logLevel:        logLevel,
-		logPath:         logPath,
-		logRoot:         logRoot,
-		modemPort:       modemPort,
-		modemSpeed:      modemSpeed,
-		nRSTPin:         nRSTPin,
-		paEnablePin:     paEnablePin,
-		boot0Pin:        boot0Pin,
-		symbolsIn:       symbolsIn,
-		symbolsOut:      symbolsOut,
-		dashboardLogger: dashboardLogger,
+		callsign:         callsign,
+		duplex:           duplex,
+		rxFrequency:      uint32(rxFrequency),
+		txFrequency:      uint32(txFrequency),
+		power:            float32(power),
+		afc:              afc,
+		frequencyCorr:    int16(frequencyCorr),
+		defaultReflector: reflectorName,
+		defaultModule:    reflectorModule,
+		logLevel:         logLevel,
+		logPath:          logPath,
+		logRoot:          logRoot,
+		modemPort:        modemPort,
+		modemSpeed:       modemSpeed,
+		nRSTPin:          nRSTPin,
+		paEnablePin:      paEnablePin,
+		boot0Pin:         boot0Pin,
+		symbolsIn:        symbolsIn,
+		symbolsOut:       symbolsOut,
+		dashboardLogger:  dashboardLogger,
+		hostfile:         reflectorHostfile,
+		overrideHostfile: reflectorOverrideHostfile,
 	}, err
 }
 
@@ -276,28 +282,38 @@ type Gateway struct {
 	Port   uint
 	Module string
 
-	modem           m17.Modem
-	in              *os.File
-	out             *os.File
-	relay           *m17.Relay
-	duplex          bool
-	done            bool
-	dashboardLogger *slog.Logger
+	modem            m17.Modem
+	in               *os.File
+	out              *os.File
+	relay            *m17.Relay
+	duplex           bool
+	done             bool
+	dashboardLogger  *slog.Logger
+	hostfile         *m17.Hostfile
+	overrideHostfile *m17.Hostfile
 }
 
 func NewGateway(cfg config, modem m17.Modem) (*Gateway, error) {
 	var err error
 
 	g := Gateway{
-		Name:            cfg.reflectorName,
-		Server:          cfg.reflectorAddr,
-		Port:            cfg.reflectorPort,
-		Module:          cfg.reflectorModule,
-		modem:           modem,
-		duplex:          cfg.duplex,
-		dashboardLogger: cfg.dashboardLogger,
+		Name:             cfg.defaultReflector,
+		Module:           cfg.defaultModule,
+		modem:            modem,
+		duplex:           cfg.duplex,
+		dashboardLogger:  cfg.dashboardLogger,
+		hostfile:         cfg.hostfile,
+		overrideHostfile: cfg.overrideHostfile,
 	}
-
+	h, ok := g.overrideHostfile.Hosts[g.Name]
+	if !ok {
+		h, ok = g.hostfile.Hosts[g.Name]
+		if !ok {
+			return nil, fmt.Errorf("reflector %s not found", g.Name)
+		}
+	}
+	g.Server = h.Server
+	g.Port = h.Port
 	log.Printf("[DEBUG] Connecting to %s:%d, module %s", g.Server, g.Port, g.Module)
 	g.relay, err = m17.NewRelay(g.Server, g.Port, g.Module, cfg.callsign, cfg.dashboardLogger, g.TransmitPacket, g.TransmitVoiceStream)
 	if err != nil {

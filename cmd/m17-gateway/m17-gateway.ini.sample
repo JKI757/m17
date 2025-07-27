@@ -14,9 +14,9 @@ FrequencyCorr=0
 Duplex=false
 
 [Reflector]
+HostFile=/opt/m17/m17-gateway/M17Hosts.txt
+OverrideHostFile=/opt/m17/m17-gateway/OverrideHosts.txt
 Name=M17-M17
-Address=m17.openquad.net
-Port=17000
 Module=C
 
 [Log]
