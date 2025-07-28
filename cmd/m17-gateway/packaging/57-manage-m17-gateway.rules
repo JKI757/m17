@@ -1,7 +1,10 @@
 polkit.addRule(function(action, subject) {
     if (action.id == "org.freedesktop.systemd1.manage-units" &&
         action.lookup("unit") == "m17-gateway.service" &&
-        subject.group == "m17-gateway-control") {
-        return polkit.Result.YES;
+        subject.isInGroup("m17-gateway-control")) {
+        var verb = action.lookup("verb");
+        if (verb == "start" || verb == "stop" || verb == "restart") {
+            return polkit.Result.YES;
+        }
     }
-})
+});
