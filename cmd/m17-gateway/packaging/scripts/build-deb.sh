@@ -35,6 +35,9 @@ cp "${PACKAGE_NAME}.service" "../${BUILD_DIR}/etc/systemd/system/"
 # Copy polkit rule
 cp "57-manage-m17-gateway.rules" "../${BUILD_DIR}/etc/polkit-1/rules.d/"
 
+# Create dashboard.log
+touch "../${BUILD_DIR}/opt/m17/m17-gateway/dashboard.log"
+
 # Copy control file and replace version
 sed "s/VERSION_PLACEHOLDER/${VERSION}/g" debian/control > "../${BUILD_DIR}/DEBIAN/control"
 
