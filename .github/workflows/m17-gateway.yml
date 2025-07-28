@@ -58,12 +58,12 @@ jobs:
     - name: Make build script executable
       run: |
         cd cmd/m17-gateway
-        chmod +x scripts/build-deb.sh
+        chmod +x ./packaging/scripts/build-deb.sh
     
     - name: Build .deb package
       run: |
         cd cmd/m17-gateway
-        ./scripts/build-deb.sh ${{ steps.version.outputs.VERSION }}
+        ./packaging/scripts/build-deb.sh ${{ steps.version.outputs.VERSION }}
     
     - name: List build artifacts
       run: |

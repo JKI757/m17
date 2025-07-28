@@ -20,23 +20,26 @@ mkdir -p "${BUILD_DIR}/DEBIAN"
 # Copy binary
 cp "${PACKAGE_NAME}" "${BUILD_DIR}/opt/m17/m17-gateway/"
 
+cd packaging
 # Copy hostfiles
-cp "M17Hosts.txt" "${BUILD_DIR}/opt/m17/m17-gateway/"
-cp "OverrideHosts.txt" "${BUILD_DIR}/opt/m17/m17-gateway/"
+cp "M17Hosts.txt" "../${BUILD_DIR}/opt/m17/m17-gateway/"
+cp "OverrideHosts.txt" "../${BUILD_DIR}/opt/m17/m17-gateway/"
 
 # Copy configuration file
-cp "${PACKAGE_NAME}.ini.sample" "${BUILD_DIR}/etc/"
+cp "${PACKAGE_NAME}.ini.sample" "../${BUILD_DIR}/etc/"
 
 # Copy systemd service file
-cp "${PACKAGE_NAME}.service" "${BUILD_DIR}/etc/systemd/system/"
+cp "${PACKAGE_NAME}.service" "../${BUILD_DIR}/etc/systemd/system/"
 
 # Copy control file and replace version
-sed "s/VERSION_PLACEHOLDER/${VERSION}/g" debian/control > "${BUILD_DIR}/DEBIAN/control"
+sed "s/VERSION_PLACEHOLDER/${VERSION}/g" debian/control > "../${BUILD_DIR}/DEBIAN/control"
 
 # Copy debian scripts
-cp debian/postinst "${BUILD_DIR}/DEBIAN/"
-cp debian/prerm "${BUILD_DIR}/DEBIAN/"
-cp debian/postrm "${BUILD_DIR}/DEBIAN/"
+cp debian/postinst "../${BUILD_DIR}/DEBIAN/"
+cp debian/prerm "../${BUILD_DIR}/DEBIAN/"
+cp debian/postrm "../${BUILD_DIR}/DEBIAN/"
+
+cd ..
 
 # Make scripts executable
 chmod +x "${BUILD_DIR}/DEBIAN/postinst"
