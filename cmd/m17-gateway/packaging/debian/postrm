@@ -12,6 +12,10 @@ if [ "$1" = "purge" ]; then
         groupdel m17-gateway
     fi
     
+    if getent group m17-gateway-control >/dev/null; then
+        groupdel m17-gateway-control
+    fi
+
     # Remove directories
     rm -rf /opt/m17/m17-gateway
 

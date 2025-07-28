@@ -2,9 +2,13 @@
 
 set -e
 
-# Create service user and group if they don't exist
+# Create service user and groups if they don't exist
 if ! getent group m17-gateway >/dev/null; then
     groupadd --system m17-gateway
+fi
+
+if ! getent group m17-gateway-control >/dev/null; then
+    groupadd --system m17-gateway-control
 fi
 
 if ! getent passwd m17-gateway >/dev/null; then
@@ -51,8 +55,8 @@ if [ ! -f /etc/m17-gateway.ini ]; then
     fi
 fi
 
-# Set config file ownership and permissions (readable by service user, writable by service group)
-chown m17-gateway:m17-gateway /etc/m17-gateway.ini
+# Set config file ownership and permissions (readable by service user, writable by service control group)
+chown m17-gateway:m17-gateway-control /etc/m17-gateway.ini
 chmod 664 /etc/m17-gateway.ini
 
 # Reload systemd and enable the service
