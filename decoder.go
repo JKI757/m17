@@ -164,8 +164,14 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 				if CRC(d.packetData) == 0 {
 					// log.Printf("[DEBUG] d.lsf: %v, d.packetData: %v", d.lsf, d.packetData)
 					sendToNetwork(d.lsf, d.packetData, 0, 0)
+					p := NewPacketFromBytes(append(d.lsf.ToBytes(), d.packetData...))
 					if d.dashLog != nil {
-						d.dashLog.Info("", "type", "RF", "subtype", "Packet", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", e)
+						if p.Type == PacketTypeSMS && len(p.Payload) > 0 {
+							msg := string(p.Payload[0 : len(p.Payload)-1])
+							d.dashLog.Info("", "type", "RF", "subtype", "Packet", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", e, "packetType", p.Type, "smsMessage", msg)
+						} else {
+							d.dashLog.Info("", "type", "RF", "subtype", "Packet", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", e, "packetType", p.Type)
+						}
 					}
 				} else {
 					log.Printf("[DEBUG] Bad CRC not forwarded: %x", CRC(d.packetData))

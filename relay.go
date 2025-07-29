@@ -150,7 +150,12 @@ func (c *Relay) Handle() {
 				p := NewPacketFromBytes(buffer[4:])
 				c.packetHandler(p)
 				if c.dashLog != nil {
-					c.dashLog.Info("", "type", "Internet", "subtype", "Packet", "src", p.LSF.Src.Callsign(), "dst", p.LSF.Dst.Callsign(), "can", p.LSF.CAN())
+					if p.Type == PacketTypeSMS && len(p.Payload) > 0 {
+						msg := string(p.Payload[0 : len(p.Payload)-1])
+						c.dashLog.Info("", "type", "Internet", "subtype", "Packet", "src", p.LSF.Src.Callsign(), "dst", p.LSF.Dst.Callsign(), "can", p.LSF.CAN(), "packetType", p.Type, "smsMessage", msg)
+					} else {
+						c.dashLog.Info("", "type", "Internet", "subtype", "Packet", "src", p.LSF.Src.Callsign(), "dst", p.LSF.Dst.Callsign(), "can", p.LSF.CAN(), "packetType", p.Type)
+					}
 				}
 			}
 		}
