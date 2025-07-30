@@ -36,7 +36,8 @@ func main() {
 		os.Exit(1)
 	}
 
-	r, err := m17.NewRelay(*serverArg, *portArg, *moduleArg, *callsignArg, nil, handleM17, nil)
+	// TODO: Add name argument and hostfile lookup
+	r, err := m17.NewRelay(*serverArg, *serverArg, *portArg, *moduleArg, *callsignArg, nil, handleM17, nil)
 	if err != nil {
 		fmt.Printf("Error creating client: %v", err)
 		os.Exit(1)

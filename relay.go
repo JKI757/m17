@@ -21,9 +21,12 @@ const (
 	magicPONG      = "PONG"
 	magicM17Voice  = "M17 "
 	magicM17Packet = "M17P"
+
+	maxRetries = 10
 )
 
 type Relay struct {
+	Name            string
 	Server          string
 	Port            uint
 	Module          byte
@@ -31,7 +34,8 @@ type Relay struct {
 	Callsign        string
 	conn            *net.UDPConn
 	connected       bool
-	lastPing        time.Time
+	pingTimer       *time.Timer
+	retryCount      int
 	packetHandler   func(Packet) error
 	streamHandler   func(StreamDatagram) error
 	done            bool
@@ -39,7 +43,7 @@ type Relay struct {
 	lastStreamID    uint16
 }
 
-func NewRelay(server string, port uint, module string, callsign string, dashLog *slog.Logger, packetHandler func(Packet) error, streamHandler func(StreamDatagram) error) (*Relay, error) {
+func NewRelay(name string, server string, port uint, module string, callsign string, dashLog *slog.Logger, packetHandler func(Packet) error, streamHandler func(StreamDatagram) error) (*Relay, error) {
 	cs, err := EncodeCallsign(callsign)
 	if err != nil {
 		return nil, fmt.Errorf("bad callsign %s: %w", callsign, err)
@@ -53,7 +57,9 @@ func NewRelay(server string, port uint, module string, callsign string, dashLog 
 	case len(module) == 1:
 		m = []byte(module)[0]
 	}
-	c := Relay{
+	var r Relay
+	r = Relay{
+		Name:            name,
 		Server:          server,
 		Port:            port,
 		Module:          m,
@@ -63,39 +69,56 @@ func NewRelay(server string, port uint, module string, callsign string, dashLog 
 		streamHandler:   streamHandler,
 		dashLog:         dashLog,
 		lastStreamID:    0xFFFF,
+		pingTimer: time.AfterFunc(30*time.Second, func() {
+			log.Printf("[DEBUG] No PINGs received in > 30 seconds. Disconnected.")
+			r.connected = false
+			if r.dashLog != nil {
+				r.dashLog.Info("", "type", "Reflector", "subtype", "Disconnect", "name", r.Name, "module", string(r.Module))
+			}
+			for !r.connected && r.retryCount < maxRetries {
+				r.Connect()
+				time.Sleep(5 * time.Second)
+				r.retryCount++
+				log.Printf("[DEBUG] Retry %d, connected: %v", r.retryCount, r.connected)
+			}
+		}),
 	}
-	return &c, nil
+	r.pingTimer.Stop()
+	return &r, nil
 }
 
-func (c *Relay) Connect() error {
-	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", c.Server, c.Port))
+func (r *Relay) Connect() error {
+	addr, err := net.ResolveUDPAddr("udp", fmt.Sprintf("%s:%d", r.Server, r.Port))
 	if err != nil {
 		return fmt.Errorf("failed to resolve address: %w", err)
 	}
 
 	// Dial UDP connection to relay/reflector
-	c.conn, err = net.DialUDP("udp", nil, addr)
+	r.conn, err = net.DialUDP("udp", nil, addr)
 	if err != nil {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 
-	err = c.sendCONN()
+	err = r.sendCONN()
 	if err != nil {
 		return fmt.Errorf("error sending CONN: %w", err)
 	}
-	log.Printf("[DEBUG] Sent connect to %s:%d", c.Server, c.Port)
+	log.Printf("[DEBUG] Sent connect to %s:%d", r.Server, r.Port)
 	return nil
 }
-func (c *Relay) Close() error {
+func (r *Relay) Close() error {
 	log.Print("[DEBUG] Relay.Close()")
-	c.sendDISC()
-	return c.conn.Close()
+	r.sendDISC()
+	if r.dashLog != nil {
+		r.dashLog.Info("", "type", "Reflector", "subtype", "Disconnect", "name", r.Name, "module", string(r.Module))
+	}
+	return r.conn.Close()
 }
-func (c *Relay) Handle() {
-	for !c.done {
+func (r *Relay) Handle() {
+	for !r.done {
 		// Receiving a message
 		buffer := make([]byte, 1024)
-		l, _, err := c.conn.ReadFromUDP(buffer)
+		l, _, err := r.conn.ReadFromUDP(buffer)
 		if err != nil {
 			log.Printf("[DEBUG] Relay.Handle(): error reading from UDP: %v", err)
 			break
@@ -112,49 +135,58 @@ func (c *Relay) Handle() {
 		}
 		switch magic {
 		case magicACKN:
-			c.connected = true
+			r.connected = true
+			if r.dashLog != nil {
+				r.dashLog.Info("", "type", "Reflector", "subtype", "Connect", "name", r.Name, "module", string(r.Module))
+			}
 			log.Printf("[DEBUG] Received ACKN")
 		case magicNACK:
-			c.connected = false
+			r.connected = false
 			log.Print("[INFO] Received NACK, disconnecting")
-			c.done = true
+			if r.dashLog != nil {
+				r.dashLog.Info("", "type", "Reflector", "subtype", "Disconnect", "name", r.Name, "module", string(r.Module))
+			}
+			r.done = true
 		case magicDISC:
-			c.connected = false
+			r.connected = false
 			log.Print("[INFO] Received DISC, disconnecting")
-			c.done = true
+			if r.dashLog != nil {
+				r.dashLog.Info("", "type", "Reflector", "subtype", "Disconnect", "name", r.Name, "module", string(r.Module))
+			}
+			r.done = true
 		case magicPING:
-			c.sendPONG()
-			c.lastPing = time.Now()
+			r.sendPONG()
+			r.pingTimer.Reset(30 * time.Second)
 			// case magicINFO:
 		case magicM17Voice: // M17 voice stream
 			// log.Printf("[DEBUG] stream buffer: % 2x", buffer)
-			if c.streamHandler != nil {
-				sd, err := NewStreamDatagram(c.EncodedCallsign, buffer)
+			if r.streamHandler != nil {
+				sd, err := NewStreamDatagram(r.EncodedCallsign, buffer)
 				if err != nil {
 					log.Printf("[INFO] Dropping bad stream datagram: %v", err)
 				} else {
 					// log.Printf("[DEBUG] sd: %#v", sd)
-					c.streamHandler(sd)
-					if c.dashLog != nil && c.lastStreamID != sd.StreamID {
-						c.dashLog.Info("", "type", "Internet", "subtype", "Voice Start", "src", sd.LSF.Src.Callsign(), "dst", sd.LSF.Dst.Callsign(), "can", sd.LSF.CAN())
-						c.lastStreamID = sd.StreamID
+					r.streamHandler(sd)
+					if r.dashLog != nil && r.lastStreamID != sd.StreamID {
+						r.dashLog.Info("", "type", "Internet", "subtype", "Voice Start", "src", sd.LSF.Src.Callsign(), "dst", sd.LSF.Dst.Callsign(), "can", sd.LSF.CAN())
+						r.lastStreamID = sd.StreamID
 					}
-					if c.dashLog != nil && sd.LastFrame {
-						c.dashLog.Info("", "type", "Internet", "subtype", "Voice End", "src", sd.LSF.Src.Callsign(), "dst", sd.LSF.Dst.Callsign(), "can", sd.LSF.CAN())
-						c.lastStreamID = 0xFFFF
+					if r.dashLog != nil && sd.LastFrame {
+						r.dashLog.Info("", "type", "Internet", "subtype", "Voice End", "src", sd.LSF.Src.Callsign(), "dst", sd.LSF.Dst.Callsign(), "can", sd.LSF.CAN())
+						r.lastStreamID = 0xFFFF
 					}
 				}
 			}
 		case magicM17Packet: // M17 packet
-			if c.packetHandler != nil {
+			if r.packetHandler != nil {
 				p := NewPacketFromBytes(buffer[4:])
-				c.packetHandler(p)
-				if c.dashLog != nil {
+				r.packetHandler(p)
+				if r.dashLog != nil {
 					if p.Type == PacketTypeSMS && len(p.Payload) > 0 {
 						msg := string(p.Payload[0 : len(p.Payload)-1])
-						c.dashLog.Info("", "type", "Internet", "subtype", "Packet", "src", p.LSF.Src.Callsign(), "dst", p.LSF.Dst.Callsign(), "can", p.LSF.CAN(), "packetType", p.Type, "smsMessage", msg)
+						r.dashLog.Info("", "type", "Internet", "subtype", "Packet", "src", p.LSF.Src.Callsign(), "dst", p.LSF.Dst.Callsign(), "can", p.LSF.CAN(), "packetType", p.Type, "smsMessage", msg)
 					} else {
-						c.dashLog.Info("", "type", "Internet", "subtype", "Packet", "src", p.LSF.Src.Callsign(), "dst", p.LSF.Dst.Callsign(), "can", p.LSF.CAN(), "packetType", p.Type)
+						r.dashLog.Info("", "type", "Internet", "subtype", "Packet", "src", p.LSF.Src.Callsign(), "dst", p.LSF.Dst.Callsign(), "can", p.LSF.CAN(), "packetType", p.Type)
 					}
 				}
 			}
@@ -162,27 +194,21 @@ func (c *Relay) Handle() {
 	}
 }
 
-func (c *Relay) SendPacket(p Packet) error {
-	if time.Since(c.lastPing) > 30*time.Second {
-		log.Printf("[DEBUG] Last ping was at %s", c.lastPing)
-	}
+func (r *Relay) SendPacket(p Packet) error {
 	b := p.ToBytes()
 	cmd := make([]byte, 0, magicLen+len(b))
 	cmd = append(cmd, []byte(magicM17Packet)...)
 	cmd = append(cmd, b...)
 	// log.Printf("[DEBUG] p: %#v, cmd: %#v", p, cmd)
 
-	_, err := c.conn.Write(cmd)
+	_, err := r.conn.Write(cmd)
 	if err != nil {
 		return fmt.Errorf("error sending packet message: %w", err)
 	}
 	return nil
 }
 
-func (c *Relay) SendStream(lsf LSF, sid uint16, fn uint16, payload []byte) error {
-	if time.Since(c.lastPing) > 30*time.Second {
-		log.Printf("[DEBUG] Last ping was at %s", c.lastPing)
-	}
+func (r *Relay) SendStream(lsf LSF, sid uint16, fn uint16, payload []byte) error {
 	// log.Printf("[DEBUG] SendStream: LSF: %v, sid: %x, fn: %d", lsf, sid, fn)
 	cmd := make([]byte, 0, 54)
 	cmd = append(cmd, []byte(magicM17Voice)...)
@@ -193,42 +219,42 @@ func (c *Relay) SendStream(lsf LSF, sid uint16, fn uint16, payload []byte) error
 	crc := CRC(cmd[:52])
 	cmd, _ = binary.Append(cmd, binary.BigEndian, crc)
 
-	_, err := c.conn.Write(cmd)
+	_, err := r.conn.Write(cmd)
 	if err != nil {
 		return fmt.Errorf("error sending stream message: %w", err)
 	}
 	return nil
 }
 
-func (c *Relay) sendCONN() error {
+func (r *Relay) sendCONN() error {
 	cmd := make([]byte, 11)
 	copy(cmd, []byte(magicCONN))
-	copy(cmd[4:10], c.EncodedCallsign[:])
-	cmd[10] = c.Module
-	log.Printf("[DEBUG] Sending CONN callsign: %s, module %s, cmd: %#v", c.Callsign, string(c.Module), cmd)
-	_, err := c.conn.Write(cmd)
+	copy(cmd[4:10], r.EncodedCallsign[:])
+	cmd[10] = r.Module
+	log.Printf("[DEBUG] Sending CONN callsign: %s, module %s, cmd: %#v", r.Callsign, string(r.Module), cmd)
+	_, err := r.conn.Write(cmd)
 	if err != nil {
 		return fmt.Errorf("error sending CONN: %w", err)
 	}
 	return nil
 }
-func (c *Relay) sendPONG() error {
+func (r *Relay) sendPONG() error {
 	// log.Print("[DEBUG] Sending PONG")
 	cmd := make([]byte, 10)
 	copy(cmd, []byte(magicPONG))
-	copy(cmd[4:10], c.EncodedCallsign[:])
-	_, err := c.conn.Write(cmd)
+	copy(cmd[4:10], r.EncodedCallsign[:])
+	_, err := r.conn.Write(cmd)
 	if err != nil {
 		return fmt.Errorf("error sending PONG: %w", err)
 	}
 	return nil
 }
-func (c *Relay) sendDISC() error {
+func (r *Relay) sendDISC() error {
 	cmd := make([]byte, 10)
 	copy(cmd, []byte(magicDISC))
-	copy(cmd[4:10], c.EncodedCallsign[:])
+	copy(cmd[4:10], r.EncodedCallsign[:])
 	log.Printf("[DEBUG] Sending DISC cmd: %#v", cmd)
-	_, err := c.conn.Write(cmd)
+	_, err := r.conn.Write(cmd)
 	if err != nil {
 		return fmt.Errorf("error sending DISC: %w", err)
 	}

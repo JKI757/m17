@@ -314,8 +314,8 @@ func NewGateway(cfg config, modem m17.Modem) (*Gateway, error) {
 	}
 	g.Server = h.Server
 	g.Port = h.Port
-	log.Printf("[DEBUG] Connecting to %s:%d, module %s", g.Server, g.Port, g.Module)
-	g.relay, err = m17.NewRelay(g.Server, g.Port, g.Module, cfg.callsign, cfg.dashboardLogger, g.TransmitPacket, g.TransmitVoiceStream)
+	log.Printf("[DEBUG] Connecting to %s, %s:%d, module %s", g.Name, g.Server, g.Port, g.Module)
+	g.relay, err = m17.NewRelay(g.Name, g.Server, g.Port, g.Module, cfg.callsign, cfg.dashboardLogger, g.TransmitPacket, g.TransmitVoiceStream)
 	if err != nil {
 		return nil, fmt.Errorf("error creating relay: %v", err)
 	}
