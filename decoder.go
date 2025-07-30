@@ -237,6 +237,10 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 		if d.syncedType != 0 {
 			d.timeoutCnt++
 			if d.timeoutCnt > 960*2 {
+				if d.dashLog != nil && d.gotLSF && d.lastStreamFN >= 0 && uint16(d.lastStreamFN)&0x8000 != 0x8000 {
+					// If we timed out of a voice stream without a last frame, send the  here
+					d.dashLog.Info("", "type", "RF", "subtype", "Voice End", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", 0)
+				}
 				d.syncedType = 0
 				d.timeoutCnt = 0
 				d.lastStreamFN = -1
