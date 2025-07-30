@@ -57,8 +57,8 @@ func NewRelay(name string, server string, port uint, module string, callsign str
 	case len(module) == 1:
 		m = []byte(module)[0]
 	}
-	var r Relay
-	r = Relay{
+	var r *Relay
+	r = &Relay{
 		Name:            name,
 		Server:          server,
 		Port:            port,
@@ -84,7 +84,7 @@ func NewRelay(name string, server string, port uint, module string, callsign str
 		}),
 	}
 	r.pingTimer.Stop()
-	return &r, nil
+	return r, nil
 }
 
 func (r *Relay) Connect() error {
