@@ -61,9 +61,9 @@ type CC1200Modem struct {
 	// txSymbols chan float32
 	s2s SymbolToSample
 
-	trxMutex sync.Mutex
-	trxState int
-	// txTimer   *time.Timer
+	trxMutex  sync.Mutex
+	trxState  int
+	txTimer   *time.Timer
 	cmdSource chan byte
 	nRST      Line
 	paEnable  Line
@@ -82,13 +82,13 @@ func NewCC1200Modem(
 		s2s:       NewSymbolToSample(rrcTaps5, TXSymbolScalingCoeff*transmitGain, false, 5),
 		cmdSource: make(chan byte),
 	}
-	// ret.txTimer = time.AfterFunc(txTimeout, func() {
-	// 	log.Printf("[DEBUG] TX timeout")
-	// 	ret.stopTX()
-	// 	ret.Start()
-	// })
-	// // Stop it until we transmit
-	// ret.txTimer.Stop()
+	ret.txTimer = time.AfterFunc(txTimeout, func() {
+		log.Printf("[DEBUG] TX timeout")
+		ret.stopTX()
+		ret.Start()
+	})
+	// Stop it until we transmit
+	ret.txTimer.Stop()
 	ret.trxState = trxIdle
 	var err error
 	fi, err := os.Stat(port)
@@ -405,7 +405,7 @@ func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
 			return fmt.Errorf("failed to send stream frame: %w", err)
 		}
 	}
-	// m.txTimer.Reset(txTimeout)
+	m.txTimer.Reset(txTimeout)
 	if sd.LastFrame {
 		// send EOT
 		log.Printf("[DEBUG] Sending EOT for stream %x, fn %d", sd.StreamID, sd.FrameNumber)
@@ -415,7 +415,7 @@ func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
 			return fmt.Errorf("failed to send EOT: %w", err)
 		}
 		log.Printf("[DEBUG] Finished TransmitVoiceStream")
-		// m.txTimer.Reset(txTimeout)
+		m.txTimer.Reset(txTimeout)
 		time.Sleep(txVoiceStreamWait)
 		log.Printf("[DEBUG] Finished TransmitVoiceStream wait")
 		m.stopTX()
@@ -488,7 +488,7 @@ func (m *CC1200Modem) startTX() error {
 	m.trxMutex.Lock()
 	m.trxState = trxTX
 	m.trxMutex.Unlock()
-	// m.txTimer.Reset(txTimeout)
+	m.txTimer.Reset(txTimeout)
 	return nil
 }
 
@@ -507,7 +507,7 @@ func (m *CC1200Modem) stopTX() {
 		m.trxState = trxIdle
 	}
 	m.trxMutex.Unlock()
-	// m.txTimer.Stop()
+	m.txTimer.Stop()
 }
 
 func (m *CC1200Modem) SetTXFreq(freq uint32) error {
