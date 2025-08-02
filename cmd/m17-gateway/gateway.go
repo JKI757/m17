@@ -321,7 +321,7 @@ func NewGateway(cfg config, modem m17.Modem) (*Gateway, error) {
 	}
 	err = g.relay.Connect()
 	if err != nil {
-		return nil, fmt.Errorf("error connecting to %s:%d %s: %v", g.Server, g.Port, g.Module, err)
+		return nil, fmt.Errorf("error connecting to %s %s:%d %s: %v", g.Name, g.Server, g.Port, g.Module, err)
 	}
 
 	modem.Start()

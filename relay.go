@@ -75,11 +75,18 @@ func NewRelay(name string, server string, port uint, module string, callsign str
 			if r.dashLog != nil {
 				r.dashLog.Info("", "type", "Reflector", "subtype", "Disconnect", "name", r.Name, "module", string(r.Module))
 			}
+			r.retryCount = 0
 			for !r.connected && r.retryCount < maxRetries {
-				r.Connect()
-				time.Sleep(5 * time.Second)
+				err := r.Connect()
+				if err != nil {
+					log.Printf("[ERROR] Connection retry error: %v", err)
+				}
 				r.retryCount++
+				time.Sleep(5 * time.Second * time.Duration(r.retryCount))
 				log.Printf("[DEBUG] Retry %d, connected: %v", r.retryCount, r.connected)
+			}
+			if !r.connected {
+				log.Printf("[DEBUG] Max retries exceeded, giving up")
 			}
 		}),
 	}
@@ -103,7 +110,7 @@ func (r *Relay) Connect() error {
 	if err != nil {
 		return fmt.Errorf("error sending CONN: %w", err)
 	}
-	log.Printf("[DEBUG] Sent connect to %s:%d", r.Server, r.Port)
+	log.Printf("[DEBUG] Sent connect to %s %s:%d", r.Name, r.Server, r.Port)
 	return nil
 }
 func (r *Relay) Close() error {
