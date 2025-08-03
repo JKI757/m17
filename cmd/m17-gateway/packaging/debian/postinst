@@ -26,7 +26,7 @@ chmod 755 /opt/m17/m17-gateway
 # Make binary executable
 chmod +x /opt/m17/m17-gateway/m17-gateway
 
-# Only modify m17-gateway.ini if it doesn't exist, i.e. this is an upgrade
+# Only modify m17-gateway.ini if it doesn't exist, i.e. this is a new installation
 if [ ! -f /etc/m17-gateway.ini ]; then
     # Prompt for callsign if we're in an interactive terminal
     CALLSIGN=""
@@ -68,4 +68,4 @@ echo "M17 Gateway installed successfully!"
 echo "Configuration file: /etc/m17-gateway.ini"
 echo "View logs with: journalctl -u m17-gateway"
 echo "Start with: sudo systemctl start m17-gateway"
-echo "Check status with: sudo systemctl status m17-gateway"
+echo "Check status with: systemctl status m17-gateway"

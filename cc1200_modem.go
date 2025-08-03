@@ -395,7 +395,7 @@ func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
 		}
 	} else {
 		m.trxMutex.Unlock()
-		log.Printf("[DEBUG] Sending frame of stream %x, fn %d", sd.StreamID, sd.FrameNumber)
+		// log.Printf("[DEBUG] Sending frame of stream %x, fn %d", sd.StreamID, sd.FrameNumber)
 		syms, err := generateStreamSymbols(sd)
 		if err != nil {
 			return fmt.Errorf("failed to generate LSF symbols: %w", err)
