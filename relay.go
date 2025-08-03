@@ -293,9 +293,12 @@ func NewStreamDatagram(encodedCallsign [6]byte, buffer []byte) (StreamDatagram, 
 	sd.LSF = NewLSFFromLSD(buffer[2:30])
 	dst, _ := EncodeCallsign("@ALL")
 	sd.LSF.Dst = *dst
-	sd.LSF.Type[1] |= 0x2 << 5
+	sd.LSF.Type[1] &= 0x9F     // zero out Encrytion Subtype
+	sd.LSF.Type[1] |= 0x2 << 5 // Set it to ECS
 	copy(sd.LSF.Meta[:], sd.LSF.Src[:])
 	copy(sd.LSF.Meta[6:], encodedCallsign[:])
+	sd.LSF.Meta[12] = 0
+	sd.LSF.Meta[13] = 0
 	sd.LSF.CalcCRC()
 
 	_, err = binary.Decode(buffer[30:], binary.BigEndian, &sd.FrameNumber)
