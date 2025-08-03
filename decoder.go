@@ -109,7 +109,7 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 
 				if d.lsf.Type[1]&byte(LSFTypeStream) == byte(LSFTypeStream) {
 					d.syncedType = StreamSync
-					d.lichParts = 0x3F
+					d.lichParts = 0
 					d.streamFN = 0
 					d.streamID = uint16(rand.Intn(0x10000))
 					sendToNetwork(d.lsf, nil, d.streamID, d.streamFN)
@@ -192,14 +192,15 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 			var e float64
 			var fn uint16
 			d.frameData, lich, fn, lichCnt, e = d.decodeStreamFrame(pld)
-			log.Printf("[DEBUG] frameData: [% 2x], lich: %x, lichCnt: %d, fn: %x, vd: %1.1f", d.frameData, lich, lichCnt, fn, e)
+			log.Printf("[DEBUG] frameData: [% 2x], lich: %x, lichCnt: %d, d.lichParts: %x, fn: %x, d.lastStreamFN: %x, e: %1.1f", d.frameData, lich, lichCnt, d.lichParts, fn, d.lastStreamFN, e)
 
 			if d.lastStreamFN != int(fn) {
 				if d.lichParts != 0x3F && lichCnt < 6 { //6 chunks = 0b111111
 					//reconstruct LSF chunk by chunk
 					copy(d.lsfBytes[lichCnt*5:lichCnt*5+5], lich)
 					d.lichParts |= (1 << lichCnt)
-					if d.lichParts == 0x3F && !d.gotLSF {
+					if d.lichParts == 0x3F {
+						d.lichParts = 0
 						lsfB := NewLSFFromBytes(d.lsfBytes)
 						if lsfB.CheckCRC() {
 							d.lsf = &lsfB
@@ -209,7 +210,6 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 							log.Printf("[DEBUG] Received stream LSF: %v", lsfB)
 						} else {
 							log.Printf("[DEBUG] Stream LSF CRC error: %v", lsfB)
-							d.lichParts = 0
 							d.gotLSF = false
 						}
 					}
