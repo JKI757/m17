@@ -7,6 +7,7 @@ import (
 	"log"
 	"log/slog"
 	"math/rand"
+	"time"
 )
 
 const (
@@ -43,6 +44,7 @@ type Decoder struct {
 	streamFN     uint16
 	lsfBytes     []byte
 	dashLog      *slog.Logger
+	lastLogTime  time.Time
 }
 
 // 8 preamble symbols, 8 for the syncword, and 960 for the payload.
@@ -115,6 +117,30 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 					sendToNetwork(d.lsf, nil, d.streamID, d.streamFN)
 					if d.dashLog != nil {
 						d.dashLog.Info("", "type", "RF", "subtype", "Voice Start", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", e)
+						gnss := d.lsf.GNSS()
+						if gnss != nil && gnss.ValidAltitude() {
+							d.lastLogTime = time.Now()
+							args := []any{
+								"type", "RF",
+								"subtype", "GNSS",
+								"dataSource", gnss.DataSource,
+								"stationType", gnss.StationType,
+								"latitude", gnss.Latitude(),
+								"longitude", gnss.Longitude(),
+							}
+							if gnss.ValidAltitude() {
+								args = append(args,
+									"altitude", gnss.Altitude(),
+								)
+							}
+							if gnss.ValidSpeedBearing() {
+								args = append(args,
+									"speed", gnss.Speed,
+									"bearing", gnss.Bearing,
+								)
+							}
+							d.dashLog.Info("", args...)
+						}
 					}
 				} else { // packet mode
 					d.syncedType = PacketSync
@@ -208,6 +234,32 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 							d.timeoutCnt = 0
 							d.streamID = uint16(rand.Intn(0x10000))
 							log.Printf("[DEBUG] Received stream LSF: %v", lsfB)
+							gnss := d.lsf.GNSS()
+							if d.dashLog != nil && gnss != nil &&
+								gnss.ValidAltitude() &&
+								time.Since(d.lastLogTime) > 15*time.Second {
+								d.lastLogTime = time.Now()
+								args := []any{
+									"type", "RF",
+									"subtype", "GNSS",
+									"dataSource", gnss.DataSource,
+									"stationType", gnss.StationType,
+									"latitude", gnss.Latitude(),
+									"longitude", gnss.Longitude(),
+								}
+								if gnss.ValidAltitude() {
+									args = append(args,
+										"altitude", gnss.Altitude(),
+									)
+								}
+								if gnss.ValidSpeedBearing() {
+									args = append(args,
+										"speed", gnss.Speed,
+										"bearing", gnss.Bearing,
+									)
+								}
+								d.dashLog.Info("", args...)
+							}
 						} else {
 							log.Printf("[DEBUG] Stream LSF CRC error: %v", lsfB)
 							d.gotLSF = false
@@ -221,7 +273,7 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 					d.streamFN = (fn >> 8) | ((fn & 0xFF) << 8)
 					sendToNetwork(d.lsf, d.frameData, d.streamID, d.streamFN)
 					d.timeoutCnt = 0
-					// This doesn't work because the high bit is never set in actual frams received from my CS7000
+					// This doesn't work because the high bit is never set in actual frames received from my CS7000
 					if d.dashLog != nil && fn&0x8000 == 0x8000 {
 						d.dashLog.Info("", "type", "RF", "subtype", "Voice End", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", e)
 					}

@@ -12,10 +12,10 @@ import (
 const (
 	magicLen = 4
 
-	magicACKN      = "ACKN"
-	magicCONN      = "CONN"
-	magicDISC      = "DISC"
-	magicLSTN      = "LSTN"
+	magicACKN = "ACKN"
+	magicCONN = "CONN"
+	magicDISC = "DISC"
+	// magicLSTN      = "LSTN"
 	magicNACK      = "NACK"
 	magicPING      = "PING"
 	magicPONG      = "PONG"
@@ -24,6 +24,8 @@ const (
 
 	maxRetries = 10
 )
+
+var callsignAll, _ = EncodeCallsign("@ALL")
 
 type Relay struct {
 	Name            string
@@ -41,6 +43,7 @@ type Relay struct {
 	done            bool
 	dashLog         *slog.Logger
 	lastStreamID    uint16
+	lastLogTime     time.Time
 }
 
 func NewRelay(name string, server string, port uint, module string, callsign string, dashLog *slog.Logger, packetHandler func(Packet) error, streamHandler func(StreamDatagram) error) (*Relay, error) {
@@ -168,15 +171,47 @@ func (r *Relay) Handle() {
 		case magicM17Voice: // M17 voice stream
 			// log.Printf("[DEBUG] stream buffer: % 2x", buffer)
 			if r.streamHandler != nil {
-				sd, err := NewStreamDatagram(r.EncodedCallsign, buffer)
+				sd, err := NewStreamDatagram(buffer)
 				if err != nil {
 					log.Printf("[INFO] Dropping bad stream datagram: %v", err)
 				} else {
+					gnss := sd.LSF.GNSS()
+					sd.LSF.Dst = *callsignAll
+					sd.LSF.Type[1] &= 0x9F     // zero out Encrytion Subtype
+					sd.LSF.Type[1] |= 0x2 << 5 // Set it to ECS
+					copy(sd.LSF.Meta[:], sd.LSF.Src[:])
+					copy(sd.LSF.Meta[6:], r.EncodedCallsign[:])
+					sd.LSF.Meta[12] = 0
+					sd.LSF.Meta[13] = 0
+					sd.LSF.CalcCRC()
 					// log.Printf("[DEBUG] sd: %#v", sd)
 					r.streamHandler(sd)
 					if r.dashLog != nil && r.lastStreamID != sd.StreamID {
 						r.dashLog.Info("", "type", "Internet", "subtype", "Voice Start", "src", sd.LSF.Src.Callsign(), "dst", sd.LSF.Dst.Callsign(), "can", sd.LSF.CAN())
 						r.lastStreamID = sd.StreamID
+					}
+					if r.dashLog != nil && gnss != nil && gnss.ValidAltitude() && time.Since(r.lastLogTime) > 15*time.Second {
+						r.lastLogTime = time.Now()
+						args := []any{
+							"type", "Internet",
+							"subtype", "GNSS",
+							"dataSource", gnss.DataSource,
+							"stationType", gnss.StationType,
+							"latitude", gnss.Latitude(),
+							"longitude", gnss.Longitude(),
+						}
+						if gnss.ValidAltitude() {
+							args = append(args,
+								"altitude", gnss.Altitude(),
+							)
+						}
+						if gnss.ValidSpeedBearing() {
+							args = append(args,
+								"speed", gnss.Speed,
+								"bearing", gnss.Bearing,
+							)
+						}
+						r.dashLog.Info("", args...)
 					}
 					if r.dashLog != nil && sd.LastFrame {
 						r.dashLog.Info("", "type", "Internet", "subtype", "Voice End", "src", sd.LSF.Src.Callsign(), "dst", sd.LSF.Dst.Callsign(), "can", sd.LSF.CAN())
@@ -276,7 +311,7 @@ type StreamDatagram struct {
 	Payload     [16]byte
 }
 
-func NewStreamDatagram(encodedCallsign [6]byte, buffer []byte) (StreamDatagram, error) {
+func NewStreamDatagram(buffer []byte) (StreamDatagram, error) {
 	sd := StreamDatagram{}
 	if len(buffer) != 54 {
 		return sd, fmt.Errorf("stream datagram buffer length %d != 50", len(buffer))
@@ -291,14 +326,6 @@ func NewStreamDatagram(encodedCallsign [6]byte, buffer []byte) (StreamDatagram, 
 		return sd, fmt.Errorf("bad streamID from stream datagram: %v", err)
 	}
 	sd.LSF = NewLSFFromLSD(buffer[2:30])
-	dst, _ := EncodeCallsign("@ALL")
-	sd.LSF.Dst = *dst
-	sd.LSF.Type[1] &= 0x9F     // zero out Encrytion Subtype
-	sd.LSF.Type[1] |= 0x2 << 5 // Set it to ECS
-	copy(sd.LSF.Meta[:], sd.LSF.Src[:])
-	copy(sd.LSF.Meta[6:], encodedCallsign[:])
-	sd.LSF.Meta[12] = 0
-	sd.LSF.Meta[13] = 0
 	sd.LSF.CalcCRC()
 
 	_, err = binary.Decode(buffer[30:], binary.BigEndian, &sd.FrameNumber)

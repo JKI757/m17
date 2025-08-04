@@ -275,25 +275,25 @@ func (l LSF) String() string {
 }
 
 type GNSS struct {
-	DataSource     byte
-	StationType    byte
-	latDegrees     byte
-	latFraction    uint16
-	lonDegrees     byte
-	lonFraction    uint16
-	miscBits       byte
-	altitude       uint16
-	BearingDegrees uint16
-	SpeedMPH       byte
+	DataSource  byte
+	StationType byte
+	latDegrees  byte
+	latFraction uint16
+	lonDegrees  byte
+	lonFraction uint16
+	miscBits    byte
+	altitude    uint16
+	Bearing     uint16
+	Speed       byte
 }
 
 func NewGNSS(dataSource, stationType byte, latitude, longitude float32, altitude, bearing, speed int, altitudeValid, speedBearingValid bool) GNSS {
 	g := GNSS{
-		DataSource:     dataSource,
-		StationType:    stationType,
-		altitude:       uint16(altitude + 1500),
-		BearingDegrees: uint16(bearing),
-		SpeedMPH:       byte(speed),
+		DataSource:  dataSource,
+		StationType: stationType,
+		altitude:    uint16(altitude + 1500),
+		Bearing:     uint16(bearing),
+		Speed:       byte(speed),
 	}
 	l, f := math.Modf(float64(latitude))
 	if l < 0 {
@@ -322,27 +322,23 @@ func NewGNSSFromMeta(meta [14]byte) (GNSS, error) {
 		DataSource:  meta[0],
 		StationType: meta[1],
 		latDegrees:  meta[2],
-		// latFraction uint16
-		lonDegrees: meta[5],
-		// lonFraction    uint16
-		miscBits: meta[8],
-		// altitude       uint16
-		// BearingDegrees uint16
-		SpeedMPH: meta[13],
+		lonDegrees:  meta[5],
+		miscBits:    meta[8],
+		Speed:       meta[13],
 	}
-	_, err := binary.Decode(meta[3:5], binary.BigEndian, &g.latFraction)
+	_, err := binary.Decode(meta[3:5], binary.LittleEndian, &g.latFraction)
 	if err != nil {
 		return g, fmt.Errorf("decoding g.latFraction: %w", err)
 	}
-	_, err = binary.Decode(meta[6:8], binary.BigEndian, &g.lonFraction)
+	_, err = binary.Decode(meta[6:8], binary.LittleEndian, &g.lonFraction)
 	if err != nil {
 		return g, fmt.Errorf("decoding g.lonFraction: %w", err)
 	}
-	_, err = binary.Decode(meta[9:11], binary.BigEndian, &g.altitude)
+	_, err = binary.Decode(meta[9:11], binary.LittleEndian, &g.altitude)
 	if err != nil {
 		return g, fmt.Errorf("decoding g.altitude: %w", err)
 	}
-	_, err = binary.Decode(meta[11:13], binary.BigEndian, &g.BearingDegrees)
+	_, err = binary.Decode(meta[11:13], binary.LittleEndian, &g.Bearing)
 	if err != nil {
 		return g, fmt.Errorf("decoding g.BearingDegrees: %w", err)
 	}
@@ -353,14 +349,14 @@ func (g *GNSS) Latitude() float32 {
 	if g.miscBits&0x1 == 0x1 {
 		sign = float32(-1.0)
 	}
-	return float32(g.latFraction)/65535 + float32(g.latDegrees)*sign
+	return (float32(g.latFraction)/65535 + float32(g.latDegrees)) * sign
 }
 func (g *GNSS) Longitude() float32 {
 	sign := float32(1.0)
 	if g.miscBits&0x2 == 0x2 {
 		sign = float32(-1.0)
 	}
-	return float32(g.lonFraction)/65535 + float32(g.lonDegrees)*sign
+	return (float32(g.lonFraction)/65535 + float32(g.lonDegrees)) * sign
 }
 
 func (g *GNSS) ValidAltitude() bool {
@@ -377,16 +373,32 @@ func (g GNSS) String() string {
 		DataSource:  %02x,
 		StationType: %02x,
 		Latitude:    %5.3f,
-		Longitude:   %5.3f,`, g.DataSource, g.StationType, g.Latitude(), g.Longitude())
+		Longitude:   %5.3f`,
+		// latDegrees:  %v,
+		// latFraction  %v,
+		// lonDegrees:  %v,
+		// lonFraction: %v,
+		// miscBits:    %02x,
+		// altitude:    %v,
+		g.DataSource,
+		g.StationType,
+		g.Latitude(),
+		g.Longitude(),
+		// g.latDegrees,
+		// g.latFraction,
+		// g.lonDegrees,
+		// g.lonFraction,
+		// g.miscBits,
+		// g.altitude,
+	)
 	if g.ValidAltitude() {
-		s += fmt.Sprintf(`
-		Altitude:    %d,`, g.Altitude())
+		s += fmt.Sprintf(`,
+		Altitude:    %d`, g.Altitude())
 	}
 	if g.ValidSpeedBearing() {
-		s += fmt.Sprintf(`
+		s += fmt.Sprintf(`,
 		Bearing:     %d,
-		Speed:       %d,
-	}`, g.BearingDegrees, g.SpeedMPH)
+		Speed:       %d`, g.Bearing, g.Speed)
 	}
 	s += "\n	}"
 	return s
