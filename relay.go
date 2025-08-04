@@ -197,6 +197,7 @@ func (r *Relay) Handle() {
 							"subtype", "GNSS",
 							"dataSource", gnss.DataSource,
 							"stationType", gnss.StationType,
+							"src", sd.LSF.Src.Callsign(),
 							"latitude", gnss.Latitude(),
 							"longitude", gnss.Longitude(),
 						}

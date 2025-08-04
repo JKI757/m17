@@ -123,6 +123,7 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 							args := []any{
 								"type", "RF",
 								"subtype", "GNSS",
+								"src", d.lsf.Src.Callsign(),
 								"dataSource", gnss.DataSource,
 								"stationType", gnss.StationType,
 								"latitude", gnss.Latitude(),
@@ -244,6 +245,7 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 									"subtype", "GNSS",
 									"dataSource", gnss.DataSource,
 									"stationType", gnss.StationType,
+									"src", d.lsf.Src.Callsign(),
 									"latitude", gnss.Latitude(),
 									"longitude", gnss.Longitude(),
 								}
