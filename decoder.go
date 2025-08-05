@@ -233,7 +233,6 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 							d.lsf = &lsfB
 							d.gotLSF = true
 							d.timeoutCnt = 0
-							d.streamID = uint16(rand.Intn(0x10000))
 							log.Printf("[DEBUG] Received stream LSF: %v", lsfB)
 							gnss := d.lsf.GNSS()
 							if d.dashLog != nil && gnss != nil &&
@@ -270,9 +269,7 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 				}
 				log.Printf("[DEBUG] Received stream frame: FN:%04X, LICH_CNT:%d, MER: %1.1f", fn, lichCnt, e)
 				if d.gotLSF {
-					// log.Printf("[DEBUG] Sending stream frame")
-					// Not sure why we have to flip the bytes here
-					d.streamFN = (fn >> 8) | ((fn & 0xFF) << 8)
+					d.streamFN = fn
 					sendToNetwork(d.lsf, d.frameData, d.streamID, d.streamFN)
 					d.timeoutCnt = 0
 					// This doesn't work because the high bit is never set in actual frames received from my CS7000

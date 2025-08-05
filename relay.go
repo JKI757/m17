@@ -171,10 +171,11 @@ func (r *Relay) Handle() {
 		case magicM17Voice: // M17 voice stream
 			// log.Printf("[DEBUG] stream buffer: % 2x", buffer)
 			if r.streamHandler != nil {
-				sd, err := NewStreamDatagram(buffer)
+				sd, err := NewStreamDatagramFromBytes(buffer)
 				if err != nil {
 					log.Printf("[INFO] Dropping bad stream datagram: %v", err)
 				} else {
+					// log.Printf("[DEBUG] Receive StreamDatagram: %s", sd)
 					gnss := sd.LSF.GNSS()
 					sd.LSF.Dst = *callsignAll
 					sd.LSF.Type[1] &= 0x9F     // zero out Encrytion Subtype
@@ -184,7 +185,6 @@ func (r *Relay) Handle() {
 					sd.LSF.Meta[12] = 0
 					sd.LSF.Meta[13] = 0
 					sd.LSF.CalcCRC()
-					// log.Printf("[DEBUG] sd: %#v", sd)
 					r.streamHandler(sd)
 					if r.dashLog != nil && r.lastStreamID != sd.StreamID {
 						r.dashLog.Info("", "type", "Internet", "subtype", "Voice Start", "src", sd.LSF.Src.Callsign(), "dst", sd.LSF.Dst.Callsign(), "can", sd.LSF.CAN())
@@ -252,17 +252,9 @@ func (r *Relay) SendPacket(p Packet) error {
 }
 
 func (r *Relay) SendStream(lsf LSF, sid uint16, fn uint16, payload []byte) error {
-	// log.Printf("[DEBUG] SendStream: LSF: %v, sid: %x, fn: %d", lsf, sid, fn)
-	cmd := make([]byte, 0, 54)
-	cmd = append(cmd, []byte(magicM17Voice)...)
-	cmd, _ = binary.Append(cmd, binary.BigEndian, sid)
-	cmd = append(cmd, lsf.ToLSDBytes()...)
-	cmd, _ = binary.Append(cmd, binary.BigEndian, fn)
-	cmd = append(cmd, payload...)
-	crc := CRC(cmd[:52])
-	cmd, _ = binary.Append(cmd, binary.BigEndian, crc)
-
-	_, err := r.conn.Write(cmd)
+	sd := NewStreamDatagram(sid, fn, lsf, payload)
+	// log.Printf("[DEBUG] Send StreamDatagram: %s", sd)
+	_, err := r.conn.Write(sd.ToBytes())
 	if err != nil {
 		return fmt.Errorf("error sending stream message: %w", err)
 	}
@@ -312,7 +304,7 @@ type StreamDatagram struct {
 	Payload     [16]byte
 }
 
-func NewStreamDatagram(buffer []byte) (StreamDatagram, error) {
+func NewStreamDatagramFromBytes(buffer []byte) (StreamDatagram, error) {
 	sd := StreamDatagram{}
 	if len(buffer) != 54 {
 		return sd, fmt.Errorf("stream datagram buffer length %d != 50", len(buffer))
@@ -338,4 +330,37 @@ func NewStreamDatagram(buffer []byte) (StreamDatagram, error) {
 	// sd.FrameNumber &= 0x7fff
 	copy(sd.Payload[:], buffer[32:48])
 	return sd, nil
+}
+
+func NewStreamDatagram(streamID uint16, frameNumber uint16, lsf LSF, payload []byte) StreamDatagram {
+	sd := StreamDatagram{
+		StreamID:    streamID,
+		FrameNumber: frameNumber,
+		LastFrame:   frameNumber&0x8000 == 0x8000,
+		LSF:         lsf,
+	}
+	copy(sd.Payload[:], payload)
+	return sd
+}
+
+func (sd StreamDatagram) ToBytes() []byte {
+	buf := make([]byte, 0, 54)
+	buf = append(buf, []byte(magicM17Voice)...)
+	buf, _ = binary.Append(buf, binary.BigEndian, sd.StreamID)
+	buf = append(buf, sd.LSF.ToLSDBytes()...)
+	buf, _ = binary.Append(buf, binary.BigEndian, sd.FrameNumber)
+	buf = append(buf, sd.Payload[:]...)
+	crc := CRC(buf[:52])
+	buf, _ = binary.Append(buf, binary.BigEndian, crc)
+	return buf
+}
+
+func (sd StreamDatagram) String() string {
+	return fmt.Sprintf(`{
+	StreamID: %04x,
+	FrameNumber: %04x,
+	LastFrame: %v,
+	LSF: %s,
+	Payload: [% 2x],
+}`, sd.StreamID, sd.FrameNumber, sd.LastFrame, sd.LSF, sd.Payload)
 }
