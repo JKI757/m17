@@ -41,9 +41,8 @@ const (
 // )
 
 const (
-	trxIdle = iota
-	trxRX
-	trxTX
+	txIdle = iota
+	txTX
 )
 
 // txTimeout must be greater than this!
@@ -61,14 +60,16 @@ type CC1200Modem struct {
 	// txSymbols chan float32
 	s2s SymbolToSample
 
-	trxMutex  sync.Mutex
-	trxState  int
-	txTimer   *time.Timer
-	cmdSource chan byte
-	nRST      Line
-	paEnable  Line
-	boot0     Line
-	debugLog  *os.File
+	mutex                 sync.Mutex
+	txState               int  // protected by mutex
+	isCommandWithResponse bool // protected by mutex
+	txTimer               *time.Timer
+	cmdSource             chan byte
+	nRST                  Line
+	paEnable              Line
+	boot0                 Line
+	debugLog              *os.File
+	lastTXData            time.Time
 }
 
 func NewCC1200Modem(
@@ -89,16 +90,12 @@ func NewCC1200Modem(
 	})
 	// Stop it until we transmit
 	ret.txTimer.Stop()
-	ret.trxState = trxIdle
+	ret.txState = txIdle
 	var err error
 	fi, err := os.Stat(port)
 	if err != nil {
 		return nil, fmt.Errorf("modem stat: %w", err)
 	}
-	// err = ret.gpioSetup(nRSTPin, paEnablePin, boot0Pin)
-	// if err != nil {
-	// 	return nil, err
-	// }
 	if fi.Mode()&os.ModeSocket == os.ModeSocket {
 		log.Printf("[DEBUG] Opening emulator")
 		ret.modem, err = net.Dial("unix", port)
@@ -126,7 +123,6 @@ func NewCC1200Modem(
 		return nil, fmt.Errorf("rx pipeline setup: %w", err)
 	}
 	go ret.processReceivedData(rxSource)
-
 	_, err = ret.commandWithResponse([]byte{cmdPing, 2})
 	if err != nil {
 		return nil, fmt.Errorf("test PING: %w", err)
@@ -147,9 +143,13 @@ func (m *CC1200Modem) processReceivedData(rxSource chan int8) {
 		n, err := m.modem.Read(buf)
 		if n > 0 {
 			// log.Printf("[DEBUG] processReceivedData read %x, trxState: %d", buf[0], m.trxState.Load())
-			m.trxMutex.Lock()
-			if m.trxState == trxRX {
-				m.trxMutex.Unlock()
+			m.mutex.Lock()
+			if m.isCommandWithResponse {
+				m.mutex.Unlock()
+				// log.Printf("[DEBUG] processReceivedData cmdSource <- : %x", buf[0])
+				m.cmdSource <- buf[0]
+			} else {
+				m.mutex.Unlock()
 				select {
 				case rxSource <- int8(buf[0]):
 					// sent
@@ -158,10 +158,6 @@ func (m *CC1200Modem) processReceivedData(rxSource chan int8) {
 					// pipeline is full, so drop it
 					log.Printf("[DEBUG] processReceivedData dropped rx: %x", buf[0])
 				}
-			} else {
-				m.trxMutex.Unlock()
-				// log.Printf("[DEBUG] processReceivedData cmdSource <- : %x", buf[0])
-				m.cmdSource <- buf[0]
 			}
 		}
 		if err != nil {
@@ -360,10 +356,10 @@ func (m *CC1200Modem) TransmitPacket(p Packet) error {
 }
 
 func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
-	m.trxMutex.Lock()
-	if m.trxState != trxTX {
+	m.mutex.Lock()
+	if m.txState != txTX {
 		// First frame
-		m.trxMutex.Unlock()
+		m.mutex.Unlock()
 		log.Printf("[DEBUG] Sending first frame of stream %x, fn %d, lsf: %v", sd.StreamID, sd.FrameNumber, sd.LSF)
 		m.stopRX()
 		time.Sleep(2 * time.Millisecond)
@@ -394,7 +390,7 @@ func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
 			return fmt.Errorf("failed to send stream frame: %w", err)
 		}
 	} else {
-		m.trxMutex.Unlock()
+		m.mutex.Unlock()
 		// log.Printf("[DEBUG] Sending frame of stream %x, fn %d", sd.StreamID, sd.FrameNumber)
 		syms, err := generateStreamSymbols(sd)
 		if err != nil {
@@ -485,28 +481,28 @@ func (m *CC1200Modem) startTX() error {
 	if err != nil {
 		log.Printf("[DEBUG] Start TX PAEnable: %v", err)
 	}
-	m.trxMutex.Lock()
-	m.trxState = trxTX
-	m.trxMutex.Unlock()
+	m.mutex.Lock()
+	m.txState = txTX
+	m.mutex.Unlock()
 	m.txTimer.Reset(txTimeout)
 	return nil
 }
 
 func (m *CC1200Modem) stopTX() {
 	log.Print("[DEBUG] modem stopTX()")
-	m.trxMutex.Lock()
+	m.mutex.Lock()
 	// Only stop if we've started
-	if m.trxState == trxTX {
-		m.trxMutex.Unlock()
+	if m.txState == txTX {
+		m.mutex.Unlock()
 		log.Print("[DEBUG] modem stopping TX")
 		err := m.setPAEnableGPIO(false)
 		if err != nil {
 			log.Printf("[DEBUG] End TX PAEnable: %v", err)
 		}
-		m.trxMutex.Lock()
-		m.trxState = trxIdle
+		m.mutex.Lock()
+		m.txState = txIdle
 	}
-	m.trxMutex.Unlock()
+	m.mutex.Unlock()
 	m.txTimer.Stop()
 }
 
@@ -543,24 +539,26 @@ func (m *CC1200Modem) Start() error {
 	log.Printf("[DEBUG] Start()")
 	// Sometimes we don't go into RX, so try stopping first
 	// m.stopRX()
-	m.trxMutex.Lock()
-	m.trxState = trxRX
-	m.trxMutex.Unlock()
+	m.mutex.Lock()
+	m.txState = txIdle
+	m.mutex.Unlock()
 	m.clearResponseBuf()
 	var err error
 	cmd := []byte{cmdSetRX, 0, 1}
+	log.Printf("[DEBUG] sending start cmd")
 	err = m.command(cmd)
 	if err != nil {
 		return fmt.Errorf("send set RX start error: %w", err)
 	}
+	log.Printf("[DEBUG] end Start()")
 	return nil
 }
 
 func (m *CC1200Modem) stopRX() error {
-	m.trxMutex.Lock()
+	m.mutex.Lock()
 	// Only stop if we've started
-	if m.trxState == trxRX {
-		m.trxMutex.Unlock()
+	if m.txState == txIdle {
+		m.mutex.Unlock()
 		log.Printf("[DEBUG] stopRX()")
 		var err error
 		cmd := []byte{cmdSetRX, 0, 0}
@@ -570,10 +568,10 @@ func (m *CC1200Modem) stopRX() error {
 			return fmt.Errorf("send set RX stop: %w", err)
 		}
 		m.clearResponseBuf()
-		m.trxMutex.Lock()
-		m.trxState = trxIdle
+		m.mutex.Lock()
+		m.txState = txIdle
 	}
-	m.trxMutex.Unlock()
+	m.mutex.Unlock()
 	return nil
 }
 func (m *CC1200Modem) SetRXFreq(freq uint32) error {
@@ -626,7 +624,13 @@ func (m *CC1200Modem) writeSymbols(symbols []Symbol) error {
 			log.Printf("[DEBUG] Failed to write to debug log: %v", err)
 		}
 	}
+	if time.Since(m.lastTXData) > 80*time.Millisecond {
+		// TX may have timed out
+		log.Printf("[DEBUG] writeSymbols timeout 80ms")
+		m.startTX()
+	}
 	_, err := m.modem.Write(buf)
+	m.lastTXData = time.Now()
 	return err
 }
 func (m *CC1200Modem) commandWithErrResponse(cmd []byte) error {
@@ -671,6 +675,9 @@ func (m *CC1200Modem) command(cmd []byte) error {
 func (m *CC1200Modem) commandWithResponse(cmd []byte) ([]byte, error) {
 	// log.Printf("[DEBUG] commandWithResponse() sending: % 2x", cmd)
 	m.clearResponseBuf()
+	m.mutex.Lock()
+	m.isCommandWithResponse = true
+	m.mutex.Unlock()
 	err := m.command(cmd)
 	if err != nil {
 		return nil, err
@@ -679,7 +686,10 @@ func (m *CC1200Modem) commandWithResponse(cmd []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("commandWithResponse(): %w", err)
 	}
-	// log.Printf("[DEBUG] commandWithResponse() received: % 2x", resp)
+	m.mutex.Lock()
+	m.isCommandWithResponse = false
+	m.mutex.Unlock()
+	log.Printf("[DEBUG] commandWithResponse() received: % 2x", resp)
 	return resp, nil
 }
 
