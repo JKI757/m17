@@ -98,7 +98,7 @@ var PacketPuncturePattern = PuncturePattern{true, true, true, true, true, true, 
 
 // Calculate distance between recent samples and sync patterns
 func syncDistance(symbols []Symbol, offset int) (float32, uint16, error) {
-	var lsf, pkt, stra, strb, str float64
+	var lsf, pkt, stra, strb, strc, str, stre, eot float64
 
 	for i, s := range symbols[offset : 16*5+offset] {
 		if i%5 == 0 {
@@ -106,6 +106,7 @@ func syncDistance(symbols []Symbol, offset int) (float32, uint16, error) {
 			lsf += (v - ExtLSFSyncSymbols[i/5]) * (v - ExtLSFSyncSymbols[i/5])
 			if i/5 < 8 {
 				pkt += (v - PacketSyncSymbols[i/5]) * (v - PacketSyncSymbols[i/5])
+				eot += (v - EOTMarkerSymbols[i/5]) * (v - EOTMarkerSymbols[i/5])
 			}
 			if i/5 > 7 {
 				stra += (v - StreamSyncSymbols[i/5-8]) * (v - StreamSyncSymbols[i/5-8])
@@ -117,20 +118,26 @@ func syncDistance(symbols []Symbol, offset int) (float32, uint16, error) {
 		if i%5 == 0 {
 			v := float64(s)
 			if i/5 > 7 {
-				stra += (v - StreamSyncSymbols[i/5-8]) * (v - StreamSyncSymbols[i/5-8])
+				strb += (v - StreamSyncSymbols[i/5-8]) * (v - StreamSyncSymbols[i/5-8])
+				strc += (v - EOTMarkerSymbols[i/5-8]) * (v - EOTMarkerSymbols[i/5-8])
 			}
 		}
 	}
 	lsf = math.Sqrt(lsf)
 	pkt = math.Sqrt(pkt)
+	eot = math.Sqrt(eot)
 	str = math.Sqrt(stra + strb)
+	stre = math.Sqrt(stra + strc)
 
-	switch min(lsf, pkt, str) {
+	switch min(lsf, pkt, str, stre, eot) {
 	case lsf:
 		return float32(lsf), LSFSync, nil
 	case pkt:
 		return float32(pkt), PacketSync, nil
-	// case str:
+	case eot:
+		return float32(eot), EOTMarker, nil
+	case stre:
+		return float32(stre), StreamSync, nil
 	default:
 		return float32(str), StreamSync, nil
 	}

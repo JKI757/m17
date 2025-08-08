@@ -356,6 +356,7 @@ func (m *CC1200Modem) TransmitPacket(p Packet) error {
 }
 
 func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
+	log.Printf("[DEBUG] TransmitVoiceStream id: %04x, fn: %04x, last: %v", sd.StreamID, sd.FrameNumber, sd.LastFrame)
 	m.mutex.Lock()
 	if m.txState != txTX {
 		// First frame
@@ -404,7 +405,7 @@ func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
 	m.txTimer.Reset(txTimeout)
 	if sd.LastFrame {
 		// send EOT
-		log.Printf("[DEBUG] Sending EOT for stream %x, fn %d", sd.StreamID, sd.FrameNumber)
+		log.Printf("[DEBUG] Sending EOT for stream %04x, fn %04x", sd.StreamID, sd.FrameNumber)
 		syms := AppendEOT(nil)
 		err := m.writeSymbols(syms)
 		if err != nil {
