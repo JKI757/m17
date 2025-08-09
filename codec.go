@@ -106,8 +106,10 @@ func syncDistance(symbols []Symbol, offset int) (float32, uint16, error) {
 			lsf += (v - ExtLSFSyncSymbols[i/5]) * (v - ExtLSFSyncSymbols[i/5])
 			if i/5 < 8 {
 				pkt += (v - PacketSyncSymbols[i/5]) * (v - PacketSyncSymbols[i/5])
-				eot += (v - EOTMarkerSymbols[i/5]) * (v - EOTMarkerSymbols[i/5])
+				// eot += (v - EOTMarkerSymbols[i/5]) * (v - EOTMarkerSymbols[i/5])
 			}
+			eot += (v - EOTMarkerSymbols[i/5%8]) * (v - EOTMarkerSymbols[i/5%8])
+
 			if i/5 > 7 {
 				stra += (v - StreamSyncSymbols[i/5-8]) * (v - StreamSyncSymbols[i/5-8])
 			}
