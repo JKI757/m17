@@ -299,10 +299,9 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 			}
 			// reset
 			d.reset()
-		case typ == EOTMarker && dist < 4.5:
-			log.Printf("[DEBUG] Received EOTMarker while not synced, distance: %f, type: %x", dist, typ)
-			symbols = symbols[16:]
-
+		// case typ == EOTMarker && dist < 4.5:
+		// 	log.Printf("[DEBUG] Received EOTMarker while not synced, distance: %f, type: %x", dist, typ)
+		// 	symbols = symbols[16:]
 		default:
 			// No one read anything, so advance one symbol
 			symbols = symbols[1:]
