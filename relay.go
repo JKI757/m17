@@ -2,10 +2,12 @@ package m17
 
 import (
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
 	"net"
+	"os"
 	"time"
 )
 
@@ -36,11 +38,12 @@ type Relay struct {
 	Callsign        string
 	conn            *net.UDPConn
 	connected       bool
+	connecting      bool
 	pingTimer       *time.Timer
 	retryCount      int
 	packetHandler   func(Packet) error
 	streamHandler   func(StreamDatagram) error
-	done            bool
+	running         bool
 	dashLog         *slog.Logger
 	lastStreamID    uint16
 	lastLogTime     time.Time
@@ -75,18 +78,27 @@ func NewRelay(name string, server string, port uint, module string, callsign str
 		lastStreamID:    0xFFFF,
 		pingTimer: time.AfterFunc(30*time.Second, func() {
 			log.Printf("[DEBUG] No PINGs received in > 30 seconds. Disconnected.")
+			r.pingTimer.Stop()
 			r.connected = false
 			if r.dashLog != nil {
 				r.dashLog.Info("", "type", "Reflector", "subtype", "Disconnect", "name", r.Name, "module", string(r.Module))
 			}
 			r.retryCount = 0
 			for !r.connected && r.retryCount < maxRetries {
+				// Close connection before retrying
+				r.conn.Close()
+				for r.running {
+					log.Printf("[DEBUG] Waiting for handler to stop...")
+					time.Sleep(10 * time.Second)
+				}
+				time.Sleep(time.Duration(r.retryCount*5) * time.Second)
 				err := r.Connect()
 				if err != nil {
 					log.Printf("[ERROR] Connection retry error: %v", err)
 				}
 				r.retryCount++
-				time.Sleep(5 * time.Second * time.Duration(r.retryCount))
+				// Wait for connection ACKN
+				time.Sleep(5 * time.Second)
 				log.Printf("[DEBUG] Retry %d, connected: %v", r.retryCount, r.connected)
 			}
 			if !r.connected {
@@ -110,61 +122,78 @@ func (r *Relay) Connect() error {
 		return fmt.Errorf("failed to connect: %w", err)
 	}
 
+	r.connecting = true
 	err = r.sendCONN()
 	if err != nil {
 		return fmt.Errorf("error sending CONN: %w", err)
 	}
 	log.Printf("[DEBUG] Sent connect to %s %s:%d", r.Name, r.Server, r.Port)
+	go r.handle()
 	return nil
 }
 func (r *Relay) Close() error {
 	log.Print("[DEBUG] Relay.Close()")
+	r.running = false
+	r.pingTimer.Stop()
 	r.sendDISC()
 	if r.dashLog != nil {
 		r.dashLog.Info("", "type", "Reflector", "subtype", "Disconnect", "name", r.Name, "module", string(r.Module))
 	}
 	return r.conn.Close()
 }
-func (r *Relay) Handle() {
-	for !r.done {
+
+func (r *Relay) handle() {
+	r.running = true
+	for r.connected || r.connecting {
+		r.conn.SetDeadline(time.Now().Add(10 * time.Second))
 		// Receiving a message
 		buffer := make([]byte, 1024)
 		l, _, err := r.conn.ReadFromUDP(buffer)
 		if err != nil {
+			if errors.Is(err, os.ErrDeadlineExceeded) {
+				log.Printf("[DEBUG] Reflector read timed out")
+				continue
+			}
 			log.Printf("[DEBUG] Relay.Handle(): error reading from UDP: %v", err)
+			r.running = false
 			break
 		}
 		buffer = buffer[:l]
 		// log.Printf("[DEBUG] Packet received, len: %d:\n%#v\n%s\n", l, buffer, string(buffer[:4]))
 		if l < 4 {
 			// too short
+			log.Printf("[DEBUG] Short message received from reflector: [% 02x]", buffer)
 			continue
 		}
 		magic := string(buffer[0:4])
-		if magic != "PING" {
-			// log.Printf("[DEBUG] Packet received, len: %d:\n%#v\n%s\n", l, buffer, string(buffer[:4]))
-		}
+		// if magic != "PING" {
+		// 	log.Printf("[DEBUG] Packet received, len: %d:\n%#v\n%s\n", l, buffer, string(buffer[:4]))
+		// }
 		switch magic {
 		case magicACKN:
 			r.connected = true
+			r.connecting = false
 			if r.dashLog != nil {
 				r.dashLog.Info("", "type", "Reflector", "subtype", "Connect", "name", r.Name, "module", string(r.Module))
 			}
+			r.pingTimer.Reset(30 * time.Second)
 			log.Printf("[DEBUG] Received ACKN")
 		case magicNACK:
 			r.connected = false
+			r.connecting = false
 			log.Print("[INFO] Received NACK, disconnecting")
 			if r.dashLog != nil {
 				r.dashLog.Info("", "type", "Reflector", "subtype", "Disconnect", "name", r.Name, "module", string(r.Module))
 			}
-			r.done = true
+			// r.done = true
 		case magicDISC:
 			r.connected = false
+			r.connecting = false
 			log.Print("[INFO] Received DISC, disconnecting")
 			if r.dashLog != nil {
 				r.dashLog.Info("", "type", "Reflector", "subtype", "Disconnect", "name", r.Name, "module", string(r.Module))
 			}
-			r.done = true
+			// r.done = true
 		case magicPING:
 			r.sendPONG()
 			r.pingTimer.Reset(30 * time.Second)
@@ -176,7 +205,7 @@ func (r *Relay) Handle() {
 				if err != nil {
 					log.Printf("[INFO] Dropping bad stream datagram: %v", err)
 				} else {
-					log.Printf("[DEBUG] Received StreamDatagram id: %04x, fn: %04x, last: %v", sd.StreamID, sd.FrameNumber, sd.LastFrame)
+					// log.Printf("[DEBUG] Received StreamDatagram id: %04x, fn: %04x, last: %v", sd.StreamID, sd.FrameNumber, sd.LastFrame)
 					// log.Printf("[DEBUG] Receive StreamDatagram: %s", sd)
 					gnss := sd.LSF.GNSS()
 					sd.LSF.Dst = *callsignAll
@@ -187,7 +216,7 @@ func (r *Relay) Handle() {
 					sd.LSF.Meta[12] = 0
 					sd.LSF.Meta[13] = 0
 					sd.LSF.CalcCRC()
-					log.Printf("[DEBUG] Handle StreamDatagram id: %04x, fn: %04x, last: %v", sd.StreamID, sd.FrameNumber, sd.LastFrame)
+					// log.Printf("[DEBUG] Handle StreamDatagram id: %04x, fn: %04x, last: %v", sd.StreamID, sd.FrameNumber, sd.LastFrame)
 					r.streamHandler(sd)
 					if r.lastFrameTimer != nil {
 						r.lastFrameTimer.Reset(time.Second)
@@ -256,6 +285,7 @@ func (r *Relay) Handle() {
 			}
 		}
 	}
+	r.running = false
 }
 
 func (r *Relay) SendPacket(p Packet) error {

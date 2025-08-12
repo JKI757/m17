@@ -250,11 +250,6 @@ func (s *m17Server) doConnect(name string, server string, port uint, module stri
 	if err != nil {
 		fmt.Printf("Error connecting to %s:%d %s: %v", server, port, module, err)
 	}
-	go func() {
-		s.relay.Handle()
-		// When Handle exits, we're done
-		// os.Exit(0)
-	}()
 	s.name = name
 	s.host = server
 	s.port = port

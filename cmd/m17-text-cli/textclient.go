@@ -49,13 +49,6 @@ func main() {
 	}
 	defer r.Close()
 
-	// handle responses from reflector
-	go func() {
-		r.Handle()
-		// When Handle exits, we're done
-		os.Exit(0)
-	}()
-
 	handleConsoleInput(r)
 }
 

@@ -358,12 +358,6 @@ func (g *Gateway) SendToNetwork(lsf *m17.LSF, payload []byte, sid, fn uint16) er
 
 func (g *Gateway) Run() {
 	signalChan := make(chan os.Signal, 1)
-	// handle responses from reflector
-	go func() {
-		g.relay.Handle()
-		// When Handle exits, we're done
-		<-signalChan
-	}()
 	d := m17.NewDecoder(g.dashboardLogger)
 	go d.DecodeSymbols(g.modem, g.SendToNetwork)
 	// Run until we're terminated then clean up
