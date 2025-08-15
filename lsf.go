@@ -4,7 +4,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"log"
-	"math"
 )
 
 type LSFType byte
@@ -207,12 +206,8 @@ func (l *LSF) EncryptionSubtype() byte {
 
 func (l *LSF) GNSS() *GNSS {
 	if l.EncryptionType() == 0 && l.EncryptionSubtype() == 0x1 {
-		g, err := NewGNSSFromMeta(l.Meta)
-		if err != nil {
-			log.Printf("[ERROR] Bad GNSS data: %v", err)
-			return nil
-		}
-		return &g
+		g := NewGNSSFromMeta(l.Meta)
+		return g
 	}
 	return nil
 }
@@ -231,14 +226,14 @@ func (l *LSF) CAN() byte {
 
 func (l LSF) String() string {
 	s := fmt.Sprintf(`{
-	Dst: %s,
-	Src: %s,
-	Type: %#v,
-	Meta: %#v,
-	CRC: %#v,
-	LSFType: %v,
-	DataType: %v,
-	EncryptionType: %v,
+	Dst: %s
+	Src: %s
+	Type: %#v
+	Meta: %#v
+	CRC: %#v
+	LSFType: %v
+	DataType: %v
+	EncryptionType: %v
 	EncryptionSubtype: %v
 `,
 		l.Dst.Callsign(),
@@ -275,130 +270,80 @@ func (l LSF) String() string {
 }
 
 type GNSS struct {
-	DataSource  byte
-	StationType byte
-	latDegrees  byte
-	latFraction uint16
-	lonDegrees  byte
-	lonFraction uint16
-	miscBits    byte
-	altitude    uint16
-	Bearing     uint16
-	Speed       byte
+	DataSource        byte
+	StationType       byte
+	Radius            byte
+	Bearing           uint16
+	Latitude          float32
+	Longitude         float32
+	Altitude          float32
+	Speed             uint16
+	ValidLatLon       bool
+	ValidAltitude     bool
+	ValidBearingSpeed bool
+	ValidRadius       bool
 }
 
-func NewGNSS(dataSource, stationType byte, latitude, longitude float32, altitude, bearing, speed int, altitudeValid, speedBearingValid bool) GNSS {
+func NewGNSSFromMeta(meta [14]byte) *GNSS {
+	validity := meta[1] >> 4
+	if validity == 0 {
+		// Either there are no valid fields or this is V1 GNSS data
+		log.Printf("[DEBUG] Empty or V1 GNSS data: [% 02x]", meta)
+		return nil
+	}
 	g := GNSS{
-		DataSource:  dataSource,
-		StationType: stationType,
-		altitude:    uint16(altitude + 1500),
-		Bearing:     uint16(bearing),
-		Speed:       byte(speed),
+		DataSource:        meta[0] >> 4,
+		StationType:       meta[0] & 0x0f,
+		Radius:            1 << ((meta[1] & 0x0e) >> 1),
+		Bearing:           uint16(meta[1]&0x1)*256 + uint16(meta[2]),
+		Speed:             (uint16(meta[12]) << 4) | uint16(meta[13]>>4),
+		ValidLatLon:       (validity & 0x08) == 0x08,
+		ValidAltitude:     (validity & 0x04) == 0x04,
+		ValidBearingSpeed: (validity & 0x02) == 0x02,
+		ValidRadius:       (validity & 0x01) == 0x01,
 	}
-	l, f := math.Modf(float64(latitude))
-	if l < 0 {
-		g.miscBits |= 0x1
-		l = -l
-	}
-	g.latDegrees = byte(l)
-	g.latFraction = uint16(f * 65535)
-	l, f = math.Modf(float64(longitude))
-	if l < 0 {
-		g.miscBits |= 0x2
-		l = -l
-	}
-	g.lonDegrees = byte(l)
-	g.lonFraction = uint16(f * 65535)
-	if altitudeValid {
-		g.miscBits |= 0x4
-	}
-	if speedBearingValid {
-		g.miscBits |= 0x8
-	}
-	return g
-}
-func NewGNSSFromMeta(meta [14]byte) (GNSS, error) {
-	g := GNSS{
-		DataSource:  meta[0],
-		StationType: meta[1],
-		latDegrees:  meta[2],
-		lonDegrees:  meta[5],
-		miscBits:    meta[8],
-		Speed:       meta[13],
-	}
-	_, err := binary.Decode(meta[3:5], binary.LittleEndian, &g.latFraction)
-	if err != nil {
-		return g, fmt.Errorf("decoding g.latFraction: %w", err)
-	}
-	_, err = binary.Decode(meta[6:8], binary.LittleEndian, &g.lonFraction)
-	if err != nil {
-		return g, fmt.Errorf("decoding g.lonFraction: %w", err)
-	}
-	_, err = binary.Decode(meta[9:11], binary.LittleEndian, &g.altitude)
-	if err != nil {
-		return g, fmt.Errorf("decoding g.altitude: %w", err)
-	}
-	_, err = binary.Decode(meta[11:13], binary.LittleEndian, &g.Bearing)
-	if err != nil {
-		return g, fmt.Errorf("decoding g.BearingDegrees: %w", err)
-	}
-	return g, nil
-}
-func (g *GNSS) Latitude() float32 {
-	sign := float32(1.0)
-	if g.miscBits&0x1 == 0x1 {
-		sign = float32(-1.0)
-	}
-	return (float32(g.latFraction)/65535 + float32(g.latDegrees)) * sign
-}
-func (g *GNSS) Longitude() float32 {
-	sign := float32(1.0)
-	if g.miscBits&0x2 == 0x2 {
-		sign = float32(-1.0)
-	}
-	return (float32(g.lonFraction)/65535 + float32(g.lonDegrees)) * sign
+
+	// The latest spec defines the latitude and longitude fractions as 3 byte
+	// 2's complement integers. We OR the three bytes of the int24 value into
+	// the *upper* 24 bits of an int32, then rotate the int32 8 bits to the right
+	// in order to eliminate the low byte while preserving the sign.
+	fraction := ((int32(meta[3]) << 24) | (int32(meta[4]) << 16) | int32(meta[5])<<8) >> 8
+	g.Latitude = float32(fraction) / 8388607 * 90
+	fraction = ((int32(meta[6]) << 24) | (int32(meta[7]) << 16) | int32(meta[8])<<8) >> 8
+	g.Longitude = float32(fraction) / 8388607 * 180
+
+	altitude := (uint16(meta[9]) << 8) | uint16(meta[10])
+	g.Altitude = float32(altitude)/2 - 500
+
+	return &g
 }
 
-func (g *GNSS) ValidAltitude() bool {
-	return g.miscBits&0x4 == 0x4
-}
-func (g *GNSS) Altitude() int {
-	return int(g.altitude) - 1500
-}
-func (g *GNSS) ValidSpeedBearing() bool {
-	return g.miscBits&0x8 == 0x8
-}
 func (g GNSS) String() string {
-	s := fmt.Sprintf(`	GNSS: {
-		DataSource:  %02x,
-		StationType: %02x,
-		Latitude:    %5.3f,
+	s := "	GNSS: {"
+	if g.ValidLatLon {
+		s += fmt.Sprintf(`
+		DataSource:  %02x
+		StationType: %02x
+		Latitude:    %5.3f
 		Longitude:   %5.3f`,
-		// latDegrees:  %v,
-		// latFraction  %v,
-		// lonDegrees:  %v,
-		// lonFraction: %v,
-		// miscBits:    %02x,
-		// altitude:    %v,
-		g.DataSource,
-		g.StationType,
-		g.Latitude(),
-		g.Longitude(),
-		// g.latDegrees,
-		// g.latFraction,
-		// g.lonDegrees,
-		// g.lonFraction,
-		// g.miscBits,
-		// g.altitude,
-	)
-	if g.ValidAltitude() {
-		s += fmt.Sprintf(`,
-		Altitude:    %d`, g.Altitude())
+			g.DataSource,
+			g.StationType,
+			g.Latitude,
+			g.Longitude,
+		)
 	}
-	if g.ValidSpeedBearing() {
-		s += fmt.Sprintf(`,
-		Bearing:     %d,
+	if g.ValidAltitude {
+		s += fmt.Sprintf(`
+		Altitude:    %5.1f`, g.Altitude)
+	}
+	if g.ValidBearingSpeed {
+		s += fmt.Sprintf(`
+		Bearing:     %d
 		Speed:       %d`, g.Bearing, g.Speed)
+	}
+	if g.ValidRadius {
+		s += fmt.Sprintf(`
+		Radius:    %5.1f`, g.Altitude)
 	}
 	s += "\n	}"
 	return s
@@ -426,7 +371,7 @@ func (e ECD) String() string {
 		cs2 = err.Error()
 	}
 	s := fmt.Sprintf(`	ECD: {
-		Callsign1: %s,
+		Callsign1: %s
 		Callsign2: %s
 	}`, cs1, cs2)
 	return s

@@ -88,6 +88,7 @@ func NewCC1200Modem(
 		ret.stopTX()
 		ret.Start()
 	})
+	ret.lastTXData = time.Now()
 	// Stop it until we transmit
 	ret.txTimer.Stop()
 	ret.txState = txIdle
@@ -365,6 +366,7 @@ func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
 		m.stopRX()
 		time.Sleep(2 * time.Millisecond)
 		m.startTX()
+		m.lastTXData = time.Now()
 		time.Sleep(10 * time.Millisecond)
 
 		var syms []Symbol
@@ -625,10 +627,17 @@ func (m *CC1200Modem) writeSymbols(symbols []Symbol) error {
 			log.Printf("[DEBUG] Failed to write to debug log: %v", err)
 		}
 	}
-	if time.Since(m.lastTXData) > 80*time.Millisecond {
-		// TX may have timed out
-		log.Printf("[DEBUG] writeSymbols timeout 80ms")
-		m.startTX()
+	// if time.Since(m.lastTXData) > 80*time.Millisecond {
+	// 	// TX may have timed out
+	// 	log.Printf("[DEBUG] writeSymbols timeout 80ms")
+	// 	m.startTX()
+	// }
+	if time.Since(m.lastTXData) > 200*time.Millisecond {
+		log.Printf("[DEBUG] time.Since(m.lastTXData) >200ms: %v", time.Since(m.lastTXData))
+	} else if time.Since(m.lastTXData) > 160*time.Millisecond {
+		log.Printf("[DEBUG] time.Since(m.lastTXData) >160ms: %v", time.Since(m.lastTXData))
+	} else if time.Since(m.lastTXData) > 120*time.Millisecond {
+		log.Printf("[DEBUG] time.Since(m.lastTXData) >120ms: %v", time.Since(m.lastTXData))
 	}
 	_, err := m.modem.Write(buf)
 	m.lastTXData = time.Now()

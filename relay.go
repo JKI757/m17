@@ -2,6 +2,7 @@ package m17
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -236,7 +237,7 @@ func (r *Relay) handle() {
 							r.lastFrameTimer = nil
 						})
 					}
-					if r.dashLog != nil && gnss != nil && gnss.ValidAltitude() && time.Since(r.lastLogTime) > 15*time.Second {
+					if r.dashLog != nil && gnss != nil && gnss.ValidAltitude && time.Since(r.lastLogTime) > 15*time.Second {
 						r.lastLogTime = time.Now()
 						args := []any{
 							"type", "Internet",
@@ -244,18 +245,23 @@ func (r *Relay) handle() {
 							"dataSource", gnss.DataSource,
 							"stationType", gnss.StationType,
 							"src", sd.LSF.Src.Callsign(),
-							"latitude", gnss.Latitude(),
-							"longitude", gnss.Longitude(),
+							"latitude", json.Number(fmt.Sprintf("%f", gnss.Latitude)),
+							"longitude", json.Number(fmt.Sprintf("%f", gnss.Longitude)),
 						}
-						if gnss.ValidAltitude() {
+						if gnss.ValidAltitude {
 							args = append(args,
-								"altitude", gnss.Altitude(),
+								"altitude", gnss.Altitude,
 							)
 						}
-						if gnss.ValidSpeedBearing() {
+						if gnss.ValidBearingSpeed {
 							args = append(args,
 								"speed", gnss.Speed,
 								"bearing", gnss.Bearing,
+							)
+						}
+						if gnss.ValidRadius {
+							args = append(args,
+								"radius", gnss.Radius,
 							)
 						}
 						r.dashLog.Info("", args...)

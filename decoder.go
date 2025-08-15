@@ -2,6 +2,7 @@ package m17
 
 import (
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -120,9 +121,9 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 					d.streamID = uint16(rand.Intn(0x10000))
 					sendToNetwork(d.lsf, nil, d.streamID, d.streamFN)
 					if d.dashLog != nil {
-						d.dashLog.Info("", "type", "RF", "subtype", "Voice Start", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", e)
+						d.dashLog.Info("", "type", "RF", "subtype", "Voice Start", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", json.Number(fmt.Sprintf("%f", e)))
 						gnss := d.lsf.GNSS()
-						if gnss != nil && gnss.ValidAltitude() {
+						if gnss != nil && gnss.ValidLatLon {
 							d.lastLogTime = time.Now()
 							args := []any{
 								"type", "RF",
@@ -130,18 +131,23 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 								"src", d.lsf.Src.Callsign(),
 								"dataSource", gnss.DataSource,
 								"stationType", gnss.StationType,
-								"latitude", gnss.Latitude(),
-								"longitude", gnss.Longitude(),
+								"latitude", json.Number(fmt.Sprintf("%f", gnss.Latitude)),
+								"longitude", json.Number(fmt.Sprintf("%f", gnss.Longitude)),
 							}
-							if gnss.ValidAltitude() {
+							if gnss.ValidAltitude {
 								args = append(args,
-									"altitude", gnss.Altitude(),
+									"altitude", gnss.Altitude,
 								)
 							}
-							if gnss.ValidSpeedBearing() {
+							if gnss.ValidBearingSpeed {
 								args = append(args,
 									"speed", gnss.Speed,
 									"bearing", gnss.Bearing,
+								)
+							}
+							if gnss.ValidRadius {
+								args = append(args,
+									"radius", gnss.Radius,
 								)
 							}
 							d.dashLog.Info("", args...)
@@ -199,9 +205,9 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 					if d.dashLog != nil {
 						if p.Type == PacketTypeSMS && len(p.Payload) > 0 {
 							msg := string(p.Payload[0 : len(p.Payload)-1])
-							d.dashLog.Info("", "type", "RF", "subtype", "Packet", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", e, "packetType", p.Type, "smsMessage", msg)
+							d.dashLog.Info("", "type", "RF", "subtype", "Packet", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", json.Number(fmt.Sprintf("%f", e)), "packetType", p.Type, "smsMessage", msg)
 						} else {
-							d.dashLog.Info("", "type", "RF", "subtype", "Packet", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", e, "packetType", p.Type)
+							d.dashLog.Info("", "type", "RF", "subtype", "Packet", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", json.Number(fmt.Sprintf("%f", e)), "packetType", p.Type)
 						}
 					}
 				} else {
@@ -238,8 +244,9 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 							d.timeoutCnt = 0
 							log.Printf("[DEBUG] Received stream LSF: %v", lsfB)
 							gnss := d.lsf.GNSS()
-							if d.dashLog != nil && gnss != nil &&
-								gnss.ValidAltitude() &&
+							if d.dashLog != nil &&
+								gnss != nil &&
+								gnss.ValidLatLon &&
 								time.Since(d.lastLogTime) > 15*time.Second {
 								d.lastLogTime = time.Now()
 								args := []any{
@@ -248,18 +255,23 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 									"dataSource", gnss.DataSource,
 									"stationType", gnss.StationType,
 									"src", d.lsf.Src.Callsign(),
-									"latitude", gnss.Latitude(),
-									"longitude", gnss.Longitude(),
+									"latitude", json.Number(fmt.Sprintf("%f", gnss.Latitude)),
+									"longitude", json.Number(fmt.Sprintf("%f", gnss.Longitude)),
 								}
-								if gnss.ValidAltitude() {
+								if gnss.ValidAltitude {
 									args = append(args,
-										"altitude", gnss.Altitude(),
+										"altitude", gnss.Altitude,
 									)
 								}
-								if gnss.ValidSpeedBearing() {
+								if gnss.ValidBearingSpeed {
 									args = append(args,
 										"speed", gnss.Speed,
 										"bearing", gnss.Bearing,
+									)
+								}
+								if gnss.ValidRadius {
+									args = append(args,
+										"radius", gnss.Radius,
 									)
 								}
 								d.dashLog.Info("", args...)
@@ -278,7 +290,7 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 					d.timeoutCnt = 0
 					if d.dashLog != nil && lastFrame {
 						log.Printf("[DEBUG] Last frame for RF voice stream %04x", d.streamID)
-						d.dashLog.Info("", "type", "RF", "subtype", "Voice End", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", e)
+						d.dashLog.Info("", "type", "RF", "subtype", "Voice End", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", json.Number(fmt.Sprintf("%f", e)))
 					}
 				}
 				if lastFrame {
