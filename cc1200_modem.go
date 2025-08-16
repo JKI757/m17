@@ -419,6 +419,9 @@ func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
 		log.Printf("[DEBUG] Finished TransmitVoiceStream wait")
 		m.stopTX()
 		m.Start()
+		// Try to prevent "stuck between modes"
+		time.Sleep(80 * time.Millisecond)
+		m.Start()
 	}
 	return nil
 }

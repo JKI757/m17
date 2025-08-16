@@ -296,7 +296,7 @@ func NewGNSSFromMeta(meta [14]byte) *GNSS {
 		StationType:       meta[0] & 0x0f,
 		Radius:            1 << ((meta[1] & 0x0e) >> 1),
 		Bearing:           uint16(meta[1]&0x1)*256 + uint16(meta[2]),
-		Speed:             (uint16(meta[12]) << 4) | uint16(meta[13]>>4),
+		Speed:             (uint16(meta[11]) << 4) | uint16(meta[12]>>4),
 		ValidLatLon:       (validity & 0x08) == 0x08,
 		ValidAltitude:     (validity & 0x04) == 0x04,
 		ValidBearingSpeed: (validity & 0x02) == 0x02,
