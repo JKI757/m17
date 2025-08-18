@@ -255,7 +255,7 @@ func (r *Relay) handle() {
 						}
 						if gnss.ValidBearingSpeed {
 							args = append(args,
-								"speed", gnss.Speed,
+								"speed", json.Number(fmt.Sprintf("%.1f", gnss.Speed)),
 								"bearing", gnss.Bearing,
 							)
 						}
