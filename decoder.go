@@ -136,7 +136,7 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 							}
 							if gnss.ValidAltitude {
 								args = append(args,
-									"altitude", gnss.Altitude,
+									"altitude", json.Number(fmt.Sprintf("%.1f", gnss.Altitude)),
 								)
 							}
 							if gnss.ValidBearingSpeed {
@@ -260,7 +260,7 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 								}
 								if gnss.ValidAltitude {
 									args = append(args,
-										"altitude", gnss.Altitude,
+										"altitude", json.Number(fmt.Sprintf("%.1f", gnss.Altitude)),
 									)
 								}
 								if gnss.ValidBearingSpeed {

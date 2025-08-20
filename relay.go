@@ -250,7 +250,7 @@ func (r *Relay) handle() {
 						}
 						if gnss.ValidAltitude {
 							args = append(args,
-								"altitude", gnss.Altitude,
+								"altitude", json.Number(fmt.Sprintf("%.1f", gnss.Altitude)),
 							)
 						}
 						if gnss.ValidBearingSpeed {
