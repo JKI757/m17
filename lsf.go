@@ -343,7 +343,7 @@ func (g GNSS) String() string {
 	}
 	if g.ValidRadius {
 		s += fmt.Sprintf(`
-		Radius:    %5.1f`, g.Altitude)
+		Radius:      %d`, g.Radius)
 	}
 	s += "\n	}"
 	return s
