@@ -36,7 +36,8 @@ var emptyFrameData = []byte{
 }
 
 type Decoder struct {
-	syncedType uint16
+	sendToNetwork func(lsf *LSF, payload []byte, sid, fn uint16) error
+	syncedType    uint16
 
 	lsf *LSF
 
@@ -60,16 +61,17 @@ type Decoder struct {
 // plus some extra so we can make larger reads
 const symbolBufSize = 8*5 + 2*(8*5+4800/25*5) + 2 + 256
 
-func NewDecoder(dashLog *slog.Logger) *Decoder {
+func NewDecoder(dashLog *slog.Logger, sendToNetwork func(lsf *LSF, payload []byte, sid, fn uint16) error) *Decoder {
 	d := Decoder{
-		lastPacketFN: 0xff,
-		lastStreamFN: 0xffff,
-		lsfBytes:     make([]byte, 30),
-		dashLog:      dashLog,
+		sendToNetwork: sendToNetwork,
+		lastPacketFN:  0xff,
+		lastStreamFN:  0xffff,
+		lsfBytes:      make([]byte, 30),
+		dashLog:       dashLog,
 	}
 	return &d
 }
-func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, payload []byte, sid, fn uint16) error) error {
+func (d *Decoder) DecodeSymbols(in io.Reader) error {
 	var symbols []Symbol
 	var err error
 
@@ -97,213 +99,37 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 		switch {
 		case typ == LSFSync && dist < 4.5 && d.syncedType == 0:
 			log.Printf("[DEBUG] Received LSFSync, distance: %f, type: %x", dist, typ)
-			var pld []Symbol
+			var pld []SoftBit
 			symbols, pld, _, err = d.extractPayload(dist, typ, symbols)
 			if err == io.EOF {
 				return err
 				// } else if err != nil {
 				// 	// Was logged in extractPayload
 			}
-			d.gotLSF = false
-			var e float64
-			d.lsf, e = decodeLSF(pld)
-			log.Printf("[DEBUG] Received RF LSF: %s", d.lsf)
-			if d.lsf.CheckCRC() {
-				d.gotLSF = true
-				d.timeoutCnt = 0
-				d.lastStreamFN = 0xffff
-				d.lastPacketFN = 0xff
-
-				if d.lsf.Type[1]&byte(LSFTypeStream) == byte(LSFTypeStream) {
-					d.syncedType = StreamSync
-					d.lichParts = 0
-					d.streamFN = 0
-					d.streamID = uint16(rand.Intn(0x10000))
-					sendToNetwork(d.lsf, nil, d.streamID, d.streamFN)
-					if d.dashLog != nil {
-						d.dashLog.Info("", "type", "RF", "subtype", "Voice Start", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", json.Number(fmt.Sprintf("%f", e)))
-						gnss := d.lsf.GNSS()
-						if gnss != nil && gnss.ValidLatLon {
-							d.lastLogTime = time.Now()
-							args := []any{
-								"type", "RF",
-								"subtype", "GNSS",
-								"src", d.lsf.Src.Callsign(),
-								"dataSource", gnss.DataSource,
-								"stationType", gnss.StationType,
-								"latitude", json.Number(fmt.Sprintf("%f", gnss.Latitude)),
-								"longitude", json.Number(fmt.Sprintf("%f", gnss.Longitude)),
-							}
-							if gnss.ValidAltitude {
-								args = append(args,
-									"altitude", json.Number(fmt.Sprintf("%.1f", gnss.Altitude)),
-								)
-							}
-							if gnss.ValidBearingSpeed {
-								args = append(args,
-									"speed", json.Number(fmt.Sprintf("%.1f", gnss.Speed)),
-									"bearing", gnss.Bearing,
-								)
-							}
-							if gnss.ValidRadius {
-								args = append(args,
-									"radius", gnss.Radius,
-								)
-							}
-							d.dashLog.Info("", args...)
-						}
-					}
-				} else { // packet mode
-					d.syncedType = PacketSync
-					d.packetData = make([]byte, 33*25)
-				}
-			} else {
-				log.Print("[DEBUG] Bad LSF CRC")
-			}
+			d.DecodeFrame(typ, pld)
 
 		case typ == PacketSync && dist < 5.0 && d.syncedType == PacketSync:
-			var pld []Symbol
+			var pld []SoftBit
 			log.Printf("[DEBUG] Received PacketSync, distance: %f, type: %x", dist, typ)
 			symbols, pld, _, err = d.extractPayload(dist, typ, symbols)
 			if err != nil {
 				return err
 			}
-			pktFrame, e := d.decodePacketFrame(pld)
-			// log.Printf("[DEBUG] pktFrame: % x", pktFrame)
-			lastFrame := (pktFrame[25] >> 7) != 0
-
-			// If lastFrame is true, this value is the byte count in the frame,
-			// otherwise it's the frame number
-			frameNumOrByteCnt := byte((pktFrame[25] >> 2) & 0x1F)
-
-			if lastFrame && frameNumOrByteCnt > 25 {
-				log.Printf("[INFO] Fixing overrun in last frame: %d > 25", frameNumOrByteCnt)
-				frameNumOrByteCnt = 25
-			}
-
-			log.Printf("[DEBUG] pktFrame[25]: %b, frameNumOrByteCnt: %d, last: %v", pktFrame[25], frameNumOrByteCnt, lastFrame)
-			if lastFrame {
-				log.Printf("[DEBUG] Frame %d MER: %1.1f", d.lastPacketFN+1, e)
-			} else {
-				log.Printf("[DEBUG] Frame %d MER: %1.1f", frameNumOrByteCnt, e)
-			}
-			// log.Printf("[DEBUG] frameData: % x %s", pktFrame, pktFrame)
-
-			//copy data - might require some fixing
-			if frameNumOrByteCnt <= 31 && frameNumOrByteCnt == d.lastPacketFN+1 && !lastFrame {
-				copy(d.packetData[frameNumOrByteCnt*25:(frameNumOrByteCnt+1)*25], pktFrame)
-				d.lastPacketFN++
-			} else if lastFrame {
-				// log.Printf("[DEBUG] packetData[%d:%d], frameData[%d:%d] len(frameData): %d", ((d.lastPacketFrameNum + 1) * 25), ((d.lastPacketFrameNum+1)*25 + frameNumOrByteCnt), 1, (frameNumOrByteCnt + 1), len(pkt))
-				copy(d.packetData[(d.lastPacketFN+1)*25:(d.lastPacketFN+1)*25+frameNumOrByteCnt], pktFrame[:frameNumOrByteCnt])
-				d.packetData = d.packetData[:(d.lastPacketFN+1)*25+frameNumOrByteCnt]
-				// fprintf(stderr, " \033[93mContent\033[39m\n");
-				if CRC(d.packetData) == 0 {
-					// log.Printf("[DEBUG] d.lsf: %v, d.packetData: %v", d.lsf, d.packetData)
-					sendToNetwork(d.lsf, d.packetData, 0, 0)
-					p := NewPacketFromBytes(append(d.lsf.ToBytes(), d.packetData...))
-					if d.dashLog != nil {
-						if p.Type == PacketTypeSMS && len(p.Payload) > 0 {
-							msg := string(p.Payload[0 : len(p.Payload)-1])
-							d.dashLog.Info("", "type", "RF", "subtype", "Packet", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", json.Number(fmt.Sprintf("%f", e)), "packetType", p.Type, "smsMessage", msg)
-						} else {
-							d.dashLog.Info("", "type", "RF", "subtype", "Packet", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", json.Number(fmt.Sprintf("%f", e)), "packetType", p.Type)
-						}
-					}
-				} else {
-					log.Printf("[DEBUG] Bad CRC not forwarded: %x", CRC(d.packetData))
-				}
-				// cleanup
-				d.reset()
-			}
+			d.DecodeFrame(typ, pld)
 
 		case typ == StreamSync && dist < 5.0:
-			var pld []Symbol
+			var pld []SoftBit
 			log.Printf("[DEBUG] Received StreamSync, distance: %f, type: %x", dist, typ)
 			symbols, pld, _, err = d.extractPayload(dist, typ, symbols)
 			if err != nil {
 				return err
 			}
-			var lich []byte
-			var lichCnt byte
-			var e float64
-			var fn uint16
-			d.frameData, lich, fn, lichCnt, e = d.decodeStreamFrame(pld)
-			// log.Printf("[DEBUG] frameData: [% 2x], lich: %02x, lichCnt: %d, d.lichParts: %04x, fn: %04x, d.lastStreamFN: %04x, e: %1.1f", d.frameData, lich, lichCnt, d.lichParts, fn, d.lastStreamFN, e)
-			if d.lastStreamFN+1 == fn&0x7fff {
-				if d.lichParts != 0x3F && lichCnt < 6 { //6 chunks = 0b111111
-					//reconstruct LSF chunk by chunk
-					copy(d.lsfBytes[lichCnt*5:lichCnt*5+5], lich)
-					d.lichParts |= (1 << lichCnt)
-					if d.lichParts == 0x3F {
-						d.lichParts = 0
-						lsfB := NewLSFFromBytes(d.lsfBytes)
-						if lsfB.CheckCRC() {
-							d.lsf = &lsfB
-							d.gotLSF = true
-							d.timeoutCnt = 0
-							log.Printf("[DEBUG] Received stream LSF: %v", lsfB)
-							gnss := d.lsf.GNSS()
-							if d.dashLog != nil &&
-								gnss != nil &&
-								gnss.ValidLatLon &&
-								time.Since(d.lastLogTime) > 15*time.Second {
-								d.lastLogTime = time.Now()
-								args := []any{
-									"type", "RF",
-									"subtype", "GNSS",
-									"dataSource", gnss.DataSource,
-									"stationType", gnss.StationType,
-									"src", d.lsf.Src.Callsign(),
-									"latitude", json.Number(fmt.Sprintf("%f", gnss.Latitude)),
-									"longitude", json.Number(fmt.Sprintf("%f", gnss.Longitude)),
-								}
-								if gnss.ValidAltitude {
-									args = append(args,
-										"altitude", json.Number(fmt.Sprintf("%.1f", gnss.Altitude)),
-									)
-								}
-								if gnss.ValidBearingSpeed {
-									args = append(args,
-										"speed", json.Number(fmt.Sprintf("%.1f", gnss.Speed)),
-										"bearing", gnss.Bearing,
-									)
-								}
-								if gnss.ValidRadius {
-									args = append(args,
-										"radius", gnss.Radius,
-									)
-								}
-								d.dashLog.Info("", args...)
-							}
-						} else {
-							log.Printf("[DEBUG] Stream LSF CRC error: %v", lsfB)
-							d.gotLSF = false
-						}
-					}
-				}
-				log.Printf("[DEBUG] Received stream frame: FN:%04X, LICH_CNT:%d, MER: %1.1f", fn, lichCnt, e)
-				lastFrame := fn&0x8000 == 0x8000
-				if d.gotLSF {
-					d.streamFN = fn
-					sendToNetwork(d.lsf, d.frameData, d.streamID, d.streamFN)
-					d.timeoutCnt = 0
-					if d.dashLog != nil && lastFrame {
-						log.Printf("[DEBUG] Last frame for RF voice stream %04x", d.streamID)
-						d.dashLog.Info("", "type", "RF", "subtype", "Voice End", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", json.Number(fmt.Sprintf("%f", e)))
-					}
-				}
-				if lastFrame {
-					d.reset()
-				} else {
-					d.lastStreamFN = fn
-				}
-			}
+			d.DecodeFrame(typ, pld)
 		case typ == EOTMarker && dist < 4.5 && d.syncedType == StreamSync:
 			log.Printf("[DEBUG] Received EOTMarker, distance: %f, type: %x", dist, typ)
 			if d.gotLSF {
 				d.streamFN = uint16(d.lastStreamFN+1) | 0x8000
-				sendToNetwork(d.lsf, emptyFrameData, d.streamID, d.streamFN)
+				d.sendToNetwork(d.lsf, emptyFrameData, d.streamID, d.streamFN)
 				if d.dashLog != nil {
 					log.Printf("[DEBUG] EOT for RF voice stream %04x", d.streamID)
 					d.dashLog.Info("", "type", "RF", "subtype", "Voice End", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", 0)
@@ -334,7 +160,7 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 	}
 }
 
-func (d *Decoder) extractPayload(dist float32, typ uint16, symbols []Symbol) ([]Symbol, []Symbol, float32, error) {
+func (d *Decoder) extractPayload(dist float32, typ uint16, symbols []Symbol) ([]Symbol, []SoftBit, float32, error) {
 	offset := 0
 	for i := range 2 {
 		d, t, err := syncDistance(symbols, i+1)
@@ -362,17 +188,207 @@ func (d *Decoder) extractPayload(dist float32, typ uint16, symbols []Symbol) ([]
 	for i := range pld {
 		pld[i] = symbols[i*5]
 	}
+	softBits := calcSoftbits(pld)
 	// log.Printf("[DEBUG] pld: % .2f", pld)
 	// skip by most, but not all of the payload
 	// if we skip everything we miss the next packet for some reason.
 	symbols = symbols[(SymbolsPerPayload-offset-syncSize)*5:]
 	// symbols = symbols[5:]
-	return symbols, pld, dist, nil
+	return symbols, softBits, dist, nil
 }
 
-func decodeLSF(pld []Symbol) (*LSF, float64) {
+func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
+	switch typ {
+	case LSFSync:
+		d.gotLSF = false
+		var e float64
+		d.lsf, e = decodeLSF(softBits)
+		log.Printf("[DEBUG] Received RF LSF: %s", d.lsf)
+		if d.lsf.CheckCRC() {
+			d.gotLSF = true
+			d.timeoutCnt = 0
+			d.lastStreamFN = 0xffff
+			d.lastPacketFN = 0xff
+
+			if d.lsf.Type[1]&byte(LSFTypeStream) == byte(LSFTypeStream) {
+				d.syncedType = StreamSync
+				d.lichParts = 0
+				d.streamFN = 0
+				d.streamID = uint16(rand.Intn(0x10000))
+				d.sendToNetwork(d.lsf, nil, d.streamID, d.streamFN)
+				if d.dashLog != nil {
+					d.dashLog.Info("", "type", "RF", "subtype", "Voice Start", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", json.Number(fmt.Sprintf("%f", e)))
+					gnss := d.lsf.GNSS()
+					if gnss != nil && gnss.ValidLatLon {
+						d.lastLogTime = time.Now()
+						args := []any{
+							"type", "RF",
+							"subtype", "GNSS",
+							"src", d.lsf.Src.Callsign(),
+							"dataSource", gnss.DataSource,
+							"stationType", gnss.StationType,
+							"latitude", json.Number(fmt.Sprintf("%f", gnss.Latitude)),
+							"longitude", json.Number(fmt.Sprintf("%f", gnss.Longitude)),
+						}
+						if gnss.ValidAltitude {
+							args = append(args,
+								"altitude", json.Number(fmt.Sprintf("%.1f", gnss.Altitude)),
+							)
+						}
+						if gnss.ValidBearingSpeed {
+							args = append(args,
+								"speed", json.Number(fmt.Sprintf("%.1f", gnss.Speed)),
+								"bearing", gnss.Bearing,
+							)
+						}
+						if gnss.ValidRadius {
+							args = append(args,
+								"radius", gnss.Radius,
+							)
+						}
+						d.dashLog.Info("", args...)
+					}
+				}
+			} else { // packet mode
+				d.syncedType = PacketSync
+				d.packetData = make([]byte, 33*25)
+			}
+		} else {
+			log.Print("[DEBUG] Bad LSF CRC")
+		}
+
+	case PacketSync:
+		pktFrame, e := d.decodePacketFrame(softBits)
+		// log.Printf("[DEBUG] pktFrame: % x", pktFrame)
+		lastFrame := (pktFrame[25] >> 7) != 0
+
+		// If lastFrame is true, this value is the byte count in the frame,
+		// otherwise it's the frame number
+		frameNumOrByteCnt := byte((pktFrame[25] >> 2) & 0x1F)
+
+		if lastFrame && frameNumOrByteCnt > 25 {
+			log.Printf("[INFO] Fixing overrun in last frame: %d > 25", frameNumOrByteCnt)
+			frameNumOrByteCnt = 25
+		}
+
+		log.Printf("[DEBUG] pktFrame[25]: %b, frameNumOrByteCnt: %d, last: %v", pktFrame[25], frameNumOrByteCnt, lastFrame)
+		if lastFrame {
+			log.Printf("[DEBUG] Frame %d MER: %1.1f", d.lastPacketFN+1, e)
+		} else {
+			log.Printf("[DEBUG] Frame %d MER: %1.1f", frameNumOrByteCnt, e)
+		}
+		// log.Printf("[DEBUG] frameData: % x %s", pktFrame, pktFrame)
+
+		//copy data - might require some fixing
+		if frameNumOrByteCnt <= 31 && frameNumOrByteCnt == d.lastPacketFN+1 && !lastFrame {
+			copy(d.packetData[frameNumOrByteCnt*25:(frameNumOrByteCnt+1)*25], pktFrame)
+			d.lastPacketFN++
+		} else if lastFrame {
+			// log.Printf("[DEBUG] packetData[%d:%d], frameData[%d:%d] len(frameData): %d", ((d.lastPacketFrameNum + 1) * 25), ((d.lastPacketFrameNum+1)*25 + frameNumOrByteCnt), 1, (frameNumOrByteCnt + 1), len(pkt))
+			copy(d.packetData[(d.lastPacketFN+1)*25:(d.lastPacketFN+1)*25+frameNumOrByteCnt], pktFrame[:frameNumOrByteCnt])
+			d.packetData = d.packetData[:(d.lastPacketFN+1)*25+frameNumOrByteCnt]
+			// fprintf(stderr, " \033[93mContent\033[39m\n");
+			if CRC(d.packetData) == 0 {
+				// log.Printf("[DEBUG] d.lsf: %v, d.packetData: %v", d.lsf, d.packetData)
+				d.sendToNetwork(d.lsf, d.packetData, 0, 0)
+				p := NewPacketFromBytes(append(d.lsf.ToBytes(), d.packetData...))
+				if d.dashLog != nil {
+					if p.Type == PacketTypeSMS && len(p.Payload) > 0 {
+						msg := string(p.Payload[0 : len(p.Payload)-1])
+						d.dashLog.Info("", "type", "RF", "subtype", "Packet", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", json.Number(fmt.Sprintf("%f", e)), "packetType", p.Type, "smsMessage", msg)
+					} else {
+						d.dashLog.Info("", "type", "RF", "subtype", "Packet", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", json.Number(fmt.Sprintf("%f", e)), "packetType", p.Type)
+					}
+				}
+			} else {
+				log.Printf("[DEBUG] Bad CRC not forwarded: %x", CRC(d.packetData))
+			}
+			// cleanup
+			d.reset()
+		}
+
+	case StreamSync:
+		var lich []byte
+		var lichCnt byte
+		var e float64
+		var fn uint16
+		d.frameData, lich, fn, lichCnt, e = d.decodeStreamFrame(softBits)
+		// log.Printf("[DEBUG] frameData: [% 2x], lich: %02x, lichCnt: %d, d.lichParts: %04x, fn: %04x, d.lastStreamFN: %04x, e: %1.1f", d.frameData, lich, lichCnt, d.lichParts, fn, d.lastStreamFN, e)
+		if d.lastStreamFN+1 == fn&0x7fff {
+			if d.lichParts != 0x3F && lichCnt < 6 { //6 chunks = 0b111111
+				//reconstruct LSF chunk by chunk
+				copy(d.lsfBytes[lichCnt*5:lichCnt*5+5], lich)
+				d.lichParts |= (1 << lichCnt)
+				if d.lichParts == 0x3F {
+					d.lichParts = 0
+					lsfB := NewLSFFromBytes(d.lsfBytes)
+					if lsfB.CheckCRC() {
+						d.lsf = &lsfB
+						d.gotLSF = true
+						d.timeoutCnt = 0
+						log.Printf("[DEBUG] Received stream LSF: %v", lsfB)
+						gnss := d.lsf.GNSS()
+						if d.dashLog != nil &&
+							gnss != nil &&
+							gnss.ValidLatLon &&
+							time.Since(d.lastLogTime) > 15*time.Second {
+							d.lastLogTime = time.Now()
+							args := []any{
+								"type", "RF",
+								"subtype", "GNSS",
+								"dataSource", gnss.DataSource,
+								"stationType", gnss.StationType,
+								"src", d.lsf.Src.Callsign(),
+								"latitude", json.Number(fmt.Sprintf("%f", gnss.Latitude)),
+								"longitude", json.Number(fmt.Sprintf("%f", gnss.Longitude)),
+							}
+							if gnss.ValidAltitude {
+								args = append(args,
+									"altitude", json.Number(fmt.Sprintf("%.1f", gnss.Altitude)),
+								)
+							}
+							if gnss.ValidBearingSpeed {
+								args = append(args,
+									"speed", json.Number(fmt.Sprintf("%.1f", gnss.Speed)),
+									"bearing", gnss.Bearing,
+								)
+							}
+							if gnss.ValidRadius {
+								args = append(args,
+									"radius", gnss.Radius,
+								)
+							}
+							d.dashLog.Info("", args...)
+						}
+					} else {
+						log.Printf("[DEBUG] Stream LSF CRC error: %v", lsfB)
+						d.gotLSF = false
+					}
+				}
+			}
+			log.Printf("[DEBUG] Received stream frame: FN:%04X, LICH_CNT:%d, MER: %1.1f", fn, lichCnt, e)
+			lastFrame := fn&0x8000 == 0x8000
+			if d.gotLSF {
+				d.streamFN = fn
+				d.sendToNetwork(d.lsf, d.frameData, d.streamID, d.streamFN)
+				d.timeoutCnt = 0
+				if d.dashLog != nil && lastFrame {
+					log.Printf("[DEBUG] Last frame for RF voice stream %04x", d.streamID)
+					d.dashLog.Info("", "type", "RF", "subtype", "Voice End", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", json.Number(fmt.Sprintf("%f", e)))
+				}
+			}
+			if lastFrame {
+				d.reset()
+			} else {
+				d.lastStreamFN = fn
+			}
+		}
+	}
+}
+
+func decodeLSF(softBit []SoftBit) (*LSF, float64) {
 	// log.Printf("[DEBUG] decodeLSF: len(pld): %d", len(pld))
-	softBit := calcSoftbits(pld)
+	// softBit := calcSoftbits(pld)
 	// log.Printf("[DEBUG] softBit: %#v", softBit)
 
 	//derandomize
@@ -409,11 +425,11 @@ func decodeLSF(pld []Symbol) (*LSF, float64) {
 	return &l, e
 }
 
-func (d *Decoder) decodeStreamFrame(pld []Symbol) (frameData []byte, lich []byte, fn uint16, lichCnt byte, e float64) {
+func (d *Decoder) decodeStreamFrame(softBit []SoftBit) (frameData []byte, lich []byte, fn uint16, lichCnt byte, e float64) {
 	// log.Printf("[DEBUG] decodeStreamFrame: len(pld): %d", len(pld))
 	// log.Printf("[DEBUG] pld: [% 1.1f]", pld)
 
-	softBit := calcSoftbits(pld)
+	// softBit := calcSoftbits(pld)
 	// log.Printf("[DEBUG] softBit: [% 04x]", softBit)
 
 	//derandomize
@@ -439,11 +455,11 @@ func (d *Decoder) decodeStreamFrame(pld []Symbol) (frameData []byte, lich []byte
 	return frameData, lich, fn, lichCnt, e
 }
 
-func (d *Decoder) decodePacketFrame(pld []Symbol) ([]byte, float64) {
+func (d *Decoder) decodePacketFrame(softBit []SoftBit) ([]byte, float64) {
 	// log.Printf("[DEBUG] decodePacketFrame: len(pld): %d", len(pld))
 	// log.Printf("[DEBUG] pld: %#v", pld)
 
-	softBit := calcSoftbits(pld)
+	// softBit := calcSoftbits(pld)
 	// log.Printf("[DEBUG] softBit: %#v", softBit)
 
 	//derandomize
