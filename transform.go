@@ -277,7 +277,6 @@ func (t *SampleToSymbol) transform(sample int8) []float32 {
 
 // Transform float32 symbols to int8 samples
 type SymbolToSample struct {
-	// Transform[float32, int8]
 	last             *ring.Ring //length of this has to match RRC filter's length
 	rrcTaps          []float32
 	scalingCoeff     float32
@@ -297,7 +296,6 @@ func NewSymbolToSample(rrcTaps []float32, scalingCoeff float32, phaseInvert bool
 		ret.last.Value = float32(0)
 		ret.last = ret.last.Next()
 	}
-	// ret.Transform = NewTransform(sink, ret.transform, 0)
 	return ret
 }
 

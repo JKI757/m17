@@ -96,22 +96,33 @@ var StreamPuncturePattern = PuncturePattern{true, true, true, true, true, true, 
 
 var PacketPuncturePattern = PuncturePattern{true, true, true, true, true, true, true, false}
 
+var (
+	LSFPreambleSymbols = []float64{+3, -3, +3, -3, +3, -3, +3, -3}
+
+	LSFSyncSymbols    = []float64{+3, +3, +3, +3, -3, -3, +3, -3} // 0x55F7
+	ExtLSFSyncSymbols = append(LSFPreambleSymbols, LSFSyncSymbols...)
+	StreamSyncSymbols = []float64{-3, -3, -3, -3, +3, +3, -3, +3} // 0xFF5D
+	PacketSyncSymbols = []float64{+3, -3, +3, +3, -3, -3, -3, -3} // 0x75FF
+	BERTSyncSymbols   = []float64{-3, +3, -3, -3, +3, +3, +3, +3} // 0xDF55
+	EOTMarkerSymbols  = []float64{+3, +3, +3, +3, +3, +3, -3, +3} // 0x555D
+)
+
 // Calculate distance between recent samples and sync patterns
-func syncDistance(symbols []Symbol, offset int) (float32, uint16, error) {
-	var lsf, pkt, stra, strb, strc, str, stre, eot float64
+func syncDistance(symbols []Symbol, offset int) (float32, uint16) {
+	var lsf,
+		pkt, pkte, pkta, pktb,
+		str, stre, stra, strb,
+		eote, eot float64
 
 	for i, s := range symbols[offset : 16*5+offset] {
 		if i%5 == 0 {
 			v := float64(s)
 			lsf += (v - ExtLSFSyncSymbols[i/5]) * (v - ExtLSFSyncSymbols[i/5])
-			if i/5 < 8 {
-				pkt += (v - PacketSyncSymbols[i/5]) * (v - PacketSyncSymbols[i/5])
-				// eot += (v - EOTMarkerSymbols[i/5]) * (v - EOTMarkerSymbols[i/5])
-			}
 			eot += (v - EOTMarkerSymbols[i/5%8]) * (v - EOTMarkerSymbols[i/5%8])
 
 			if i/5 > 7 {
 				stra += (v - StreamSyncSymbols[i/5-8]) * (v - StreamSyncSymbols[i/5-8])
+				pkta += (v - PacketSyncSymbols[i/5-8]) * (v - PacketSyncSymbols[i/5-8])
 			}
 		}
 	}
@@ -121,27 +132,31 @@ func syncDistance(symbols []Symbol, offset int) (float32, uint16, error) {
 			v := float64(s)
 			if i/5 > 7 {
 				strb += (v - StreamSyncSymbols[i/5-8]) * (v - StreamSyncSymbols[i/5-8])
-				strc += (v - EOTMarkerSymbols[i/5-8]) * (v - EOTMarkerSymbols[i/5-8])
+				eote += (v - EOTMarkerSymbols[i/5-8]) * (v - EOTMarkerSymbols[i/5-8])
+				pktb += (v - PacketSyncSymbols[i/5-8]) * (v - PacketSyncSymbols[i/5-8])
 			}
 		}
 	}
 	lsf = math.Sqrt(lsf)
-	pkt = math.Sqrt(pkt)
+	pkt = math.Sqrt(pkta + pktb)
+	pkte = math.Sqrt(pkta + eote)
 	eot = math.Sqrt(eot)
 	str = math.Sqrt(stra + strb)
-	stre = math.Sqrt(stra + strc)
+	stre = math.Sqrt(stra + eote)
 
-	switch min(lsf, pkt, str, stre, eot) {
+	switch min(lsf, pkt, pkte, str, stre, eot) {
 	case lsf:
-		return float32(lsf), LSFSync, nil
+		return float32(lsf), LSFSync
 	case pkt:
-		return float32(pkt), PacketSync, nil
+		return float32(pkt), PacketSync
+	case pkte:
+		return float32(pkte), PacketSync
 	case eot:
-		return float32(eot), EOTMarker, nil
+		return float32(eot), EOTMarker
 	case stre:
-		return float32(stre), StreamSync, nil
+		return float32(stre), StreamSync
 	default:
-		return float32(str), StreamSync, nil
+		return float32(str), StreamSync
 	}
 }
 

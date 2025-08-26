@@ -57,8 +57,8 @@ type Line interface {
 type CC1200Modem struct {
 	modem     io.ReadWriteCloser
 	rxSymbols chan float32
-	// txSymbols chan float32
-	s2s SymbolToSample
+	s2s       SymbolToSample
+	frameSink func(typ uint16, softBits []SoftBit)
 
 	mutex                 sync.Mutex
 	txState               int  // protected by mutex
@@ -137,6 +137,11 @@ func NewCC1200Modem(
 	return ret, nil
 }
 
+func (m *CC1200Modem) StartDecoding(sink func(typ uint16, softBits []SoftBit)) {
+	m.frameSink = sink
+	go m.processSymbols()
+}
+
 func (m *CC1200Modem) processReceivedData(rxSource chan int8) {
 	buf := make([]byte, 1)
 	for {
@@ -157,7 +162,7 @@ func (m *CC1200Modem) processReceivedData(rxSource chan int8) {
 					// log.Printf("[DEBUG] processReceivedData rxSource <- : %x", buf[0])
 				default:
 					// pipeline is full, so drop it
-					log.Printf("[DEBUG] processReceivedData dropped rx: %x", buf[0])
+					log.Printf("[DEBUG] processReceivedData dropped rx: %02x", buf[0])
 				}
 			}
 		}
@@ -167,6 +172,84 @@ func (m *CC1200Modem) processReceivedData(rxSource chan int8) {
 		}
 	}
 }
+
+func (m *CC1200Modem) processSymbols() {
+	// // log.Printf("[DEBUG] Modem.read requested %d bytes", len(buf))
+	// sBuf := make([]float32, len(buf)/4)
+	// for i := range sBuf {
+	// 	sBuf[i] = <-m.rxSymbols
+	// }
+	// sb, err := binary.Append(nil, binary.LittleEndian, sBuf)
+	// if err != nil {
+	// 	return 0, fmt.Errorf("append symbol: %w", err)
+	// }
+	// cnt := copy(buf, sb)
+	// // log.Printf("[DEBUG] Modem.read returned  %d bytes", cnt)
+	var symbols []Symbol
+
+	for {
+		// Refill symbol buffer
+		for range symbolBufSize - len(symbols) {
+			symbols = append(symbols, Symbol(<-m.rxSymbols))
+		}
+
+		// Looking for a sync burst
+		//calculate euclidean norm
+		dist, typ := syncDistance(symbols, 0)
+		switch {
+		case typ == LSFSync && dist < 4.5:
+			log.Printf("[DEBUG] Received LSFSync, distance: %f, type: %x", dist, typ)
+			var pld []SoftBit
+			symbols, pld, _ = extractPayload(dist, typ, symbols)
+			m.frameSink(typ, pld)
+
+		case typ == PacketSync && dist < 5.0:
+			var pld []SoftBit
+			log.Printf("[DEBUG] Received PacketSync, distance: %f, type: %x", dist, typ)
+			symbols, pld, _ = extractPayload(dist, typ, symbols)
+			m.frameSink(typ, pld)
+
+		case typ == StreamSync && dist < 5.0:
+			var pld []SoftBit
+			log.Printf("[DEBUG] Received StreamSync, distance: %f, type: %x", dist, typ)
+			symbols, pld, _ = extractPayload(dist, typ, symbols)
+			m.frameSink(typ, pld)
+		case typ == EOTMarker && dist < 4.5:
+			log.Printf("[DEBUG] Received EOTMarker, distance: %f, type: %x", dist, typ)
+			symbols = symbols[16*5:]
+			m.frameSink(typ, nil)
+		default:
+			// No one read anything, so advance one symbol
+			symbols = symbols[1:]
+		}
+	}
+}
+
+func extractPayload(dist float32, typ uint16, symbols []Symbol) ([]Symbol, []SoftBit, float32) {
+	offset := 0
+	for i := range 2 {
+		d, t := syncDistance(symbols, i+1)
+		if t == typ && d < dist {
+			dist = d
+			offset = i + 1
+		}
+	}
+	// skip offset
+	symbols = symbols[offset:]
+	// skip past sync
+	symbols = symbols[16*5:]
+	pld := make([]Symbol, SymbolsPerPayload)
+	for i := range pld {
+		pld[i] = symbols[i*5]
+	}
+	softBits := calcSoftbits(pld)
+	// log.Printf("[DEBUG] pld: % .2f", pld)
+	// skip by most, but not all of the payload
+	// if we skip everything we miss the next packet for some reason.
+	symbols = symbols[(SymbolsPerPayload-offset-16)*5:]
+	return symbols, softBits, dist
+}
+
 func (m *CC1200Modem) rxPipeline(sampleSource chan int8) (chan float32, error) {
 	// modem samples -> DC filter --> RRC filter & scale
 	var err error
@@ -246,43 +329,6 @@ func (m *CC1200Modem) Close() error {
 	}
 	return m.modem.Close()
 }
-
-// Read received symbols
-func (m *CC1200Modem) Read(buf []byte) (n int, err error) {
-	// log.Printf("[DEBUG] Modem.read requested %d bytes", len(buf))
-	sBuf := make([]float32, len(buf)/4)
-	for i := range sBuf {
-		sBuf[i] = <-m.rxSymbols
-	}
-	sb, err := binary.Append(nil, binary.LittleEndian, sBuf)
-	if err != nil {
-		return 0, fmt.Errorf("append symbol: %w", err)
-	}
-	cnt := copy(buf, sb)
-	// log.Printf("[DEBUG] Modem.read returned  %d bytes", cnt)
-	return cnt, nil
-}
-
-// Send symbols to transmit. If no symbols are received for more than `txEndDuration` milliseconds,
-// the transmission will end.
-// func (m *CC1200Modem) Write(b []byte) (n int, err error) {
-// 	symbols := make([]float32, len(b)/4)
-// 	n, err = binary.Decode(b, binary.LittleEndian, symbols)
-// 	if err != nil {
-// 		err = fmt.Errorf("decode symbols: %w", err)
-// 		return
-// 	}
-// 	// log.Printf("[DEBUG] Write symbols: % f", symbols)
-// 	for _, s := range symbols {
-// 		m.txSymbols <- s
-// 	}
-// 	// m.updateTXTimeout()
-// 	if n < len(b) {
-// 		// should only happen if len(b) is not a multiple of 4, i.e. the last symbol is incomplete
-// 		err = fmt.Errorf("malformed transmit stream")
-// 	}
-// 	return
-// }
 
 func (m *CC1200Modem) TransmitPacket(p Packet) error {
 	log.Printf("[DEBUG] TransmitPacket: %v", p)

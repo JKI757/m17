@@ -1,10 +1,8 @@
 package m17
 
 import (
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"log/slog"
 	"math/rand"
@@ -17,17 +15,6 @@ const (
 	PacketSync = uint16(0x75FF)
 	BERTSync   = uint16(0xDF55)
 	EOTMarker  = uint16(0x555D)
-)
-
-var (
-	LSFPreambleSymbols = []float64{+3, -3, +3, -3, +3, -3, +3, -3}
-
-	LSFSyncSymbols    = []float64{+3, +3, +3, +3, -3, -3, +3, -3} // 0x55F7
-	ExtLSFSyncSymbols = append(LSFPreambleSymbols, LSFSyncSymbols...)
-	StreamSyncSymbols = []float64{-3, -3, -3, -3, +3, +3, -3, +3} // 0xFF5D
-	PacketSyncSymbols = []float64{+3, -3, +3, +3, -3, -3, -3, -3} // 0x75FF
-	BERTSyncSymbols   = []float64{-3, +3, -3, -3, +3, +3, +3, +3} // 0xDF55
-	EOTMarkerSymbols  = []float64{+3, +3, +3, +3, +3, +3, -3, +3} // 0x555D
 )
 
 var emptyFrameData = []byte{
@@ -71,135 +58,11 @@ func NewDecoder(dashLog *slog.Logger, sendToNetwork func(lsf *LSF, payload []byt
 	}
 	return &d
 }
-func (d *Decoder) DecodeSymbols(in io.Reader) error {
-	var symbols []Symbol
-	var err error
-
-	for {
-		l := len(symbols)
-		if symbolBufSize-l >= 256 {
-			// refill the buffer
-			symbols = append(symbols, make([]Symbol, symbolBufSize-l)...)
-			err = binary.Read(in, binary.LittleEndian, symbols[l:])
-			if err == io.EOF {
-				log.Printf("refill binary.Read EOF")
-				return fmt.Errorf("failed to refill symbol buffer: %v", err)
-			} else if err != nil {
-				log.Printf("refill binary.Read failed: %v", err)
-				return fmt.Errorf("failed to refill symbol buffer: %v", err)
-			}
-		}
-
-		// Looking for a sync burst
-		//calculate euclidean norm
-		dist, typ, err := syncDistance(symbols, 0)
-		if err == io.EOF {
-			return err
-		}
-		switch {
-		case typ == LSFSync && dist < 4.5 && d.syncedType == 0:
-			log.Printf("[DEBUG] Received LSFSync, distance: %f, type: %x", dist, typ)
-			var pld []SoftBit
-			symbols, pld, _, err = d.extractPayload(dist, typ, symbols)
-			if err == io.EOF {
-				return err
-				// } else if err != nil {
-				// 	// Was logged in extractPayload
-			}
-			d.DecodeFrame(typ, pld)
-
-		case typ == PacketSync && dist < 5.0 && d.syncedType == PacketSync:
-			var pld []SoftBit
-			log.Printf("[DEBUG] Received PacketSync, distance: %f, type: %x", dist, typ)
-			symbols, pld, _, err = d.extractPayload(dist, typ, symbols)
-			if err != nil {
-				return err
-			}
-			d.DecodeFrame(typ, pld)
-
-		case typ == StreamSync && dist < 5.0:
-			var pld []SoftBit
-			log.Printf("[DEBUG] Received StreamSync, distance: %f, type: %x", dist, typ)
-			symbols, pld, _, err = d.extractPayload(dist, typ, symbols)
-			if err != nil {
-				return err
-			}
-			d.DecodeFrame(typ, pld)
-		case typ == EOTMarker && dist < 4.5 && d.syncedType == StreamSync:
-			log.Printf("[DEBUG] Received EOTMarker, distance: %f, type: %x", dist, typ)
-			if d.gotLSF {
-				d.streamFN = uint16(d.lastStreamFN+1) | 0x8000
-				d.sendToNetwork(d.lsf, emptyFrameData, d.streamID, d.streamFN)
-				if d.dashLog != nil {
-					log.Printf("[DEBUG] EOT for RF voice stream %04x", d.streamID)
-					d.dashLog.Info("", "type", "RF", "subtype", "Voice End", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", 0)
-				}
-			}
-			// reset
-			d.reset()
-		// case typ == EOTMarker && dist < 4.5:
-		// 	log.Printf("[DEBUG] Received EOTMarker while not synced, distance: %f, type: %x", dist, typ)
-		// 	symbols = symbols[16:]
-		default:
-			// No one read anything, so advance one symbol
-			symbols = symbols[1:]
-		}
-
-		//RX sync timeout
-		if d.syncedType != 0 {
-			d.timeoutCnt++
-			if d.timeoutCnt > 960*2 {
-				if d.dashLog != nil && d.gotLSF && d.lastStreamFN&0x8000 != 0x8000 {
-					// If we timed out of a voice stream without a last frame, send the Voice End here
-					log.Printf("[DEBUG] Timed out RF voice stream %04x", d.streamID)
-					d.dashLog.Info("", "type", "RF", "subtype", "Voice End", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", 0)
-				}
-				d.reset()
-			}
-		}
-	}
-}
-
-func (d *Decoder) extractPayload(dist float32, typ uint16, symbols []Symbol) ([]Symbol, []SoftBit, float32, error) {
-	offset := 0
-	for i := range 2 {
-		d, t, err := syncDistance(symbols, i+1)
-		if err == io.EOF {
-			log.Printf("[INFO] extractPayload syncDistance EOF")
-			return nil, nil, 0, err
-		} else if err != nil {
-			// TODO: return error here?
-			log.Printf("[INFO] extractPayload syncDistance failed: %v", err)
-		}
-		if t == typ && d < dist {
-			dist = d
-			offset = i + 1
-		}
-	}
-	// skip offset
-	symbols = symbols[offset:]
-	// skip past sync
-	syncSize := 16
-	if typ == PacketSync {
-		syncSize = 8
-	}
-	symbols = symbols[syncSize*5:]
-	pld := make([]Symbol, SymbolsPerPayload)
-	for i := range pld {
-		pld[i] = symbols[i*5]
-	}
-	softBits := calcSoftbits(pld)
-	// log.Printf("[DEBUG] pld: % .2f", pld)
-	// skip by most, but not all of the payload
-	// if we skip everything we miss the next packet for some reason.
-	symbols = symbols[(SymbolsPerPayload-offset-syncSize)*5:]
-	// symbols = symbols[5:]
-	return symbols, softBits, dist, nil
-}
 
 func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
-	switch typ {
-	case LSFSync:
+	switch {
+	case typ == LSFSync && d.syncedType == 0:
+		log.Printf("[DEBUG] Received LSFSync, type: %x", typ)
 		d.gotLSF = false
 		var e float64
 		d.lsf, e = decodeLSF(softBits)
@@ -257,7 +120,8 @@ func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
 			log.Print("[DEBUG] Bad LSF CRC")
 		}
 
-	case PacketSync:
+	case typ == PacketSync && d.syncedType == PacketSync:
+		log.Printf("[DEBUG] Received PacketSync, type: %x", typ)
 		pktFrame, e := d.decodePacketFrame(softBits)
 		// log.Printf("[DEBUG] pktFrame: % x", pktFrame)
 		lastFrame := (pktFrame[25] >> 7) != 0
@@ -284,10 +148,9 @@ func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
 			copy(d.packetData[frameNumOrByteCnt*25:(frameNumOrByteCnt+1)*25], pktFrame)
 			d.lastPacketFN++
 		} else if lastFrame {
-			// log.Printf("[DEBUG] packetData[%d:%d], frameData[%d:%d] len(frameData): %d", ((d.lastPacketFrameNum + 1) * 25), ((d.lastPacketFrameNum+1)*25 + frameNumOrByteCnt), 1, (frameNumOrByteCnt + 1), len(pkt))
 			copy(d.packetData[(d.lastPacketFN+1)*25:(d.lastPacketFN+1)*25+frameNumOrByteCnt], pktFrame[:frameNumOrByteCnt])
 			d.packetData = d.packetData[:(d.lastPacketFN+1)*25+frameNumOrByteCnt]
-			// fprintf(stderr, " \033[93mContent\033[39m\n");
+			log.Printf("[DEBUG] pktFrame[:frameNumOrByteCnt]: % 0x, d.packetData: % 0x", pktFrame[:frameNumOrByteCnt], d.packetData)
 			if CRC(d.packetData) == 0 {
 				// log.Printf("[DEBUG] d.lsf: %v, d.packetData: %v", d.lsf, d.packetData)
 				d.sendToNetwork(d.lsf, d.packetData, 0, 0)
@@ -307,7 +170,8 @@ func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
 			d.reset()
 		}
 
-	case StreamSync:
+	case typ == StreamSync:
+		log.Printf("[DEBUG] Received StreamSync, type: %x", typ)
 		var lich []byte
 		var lichCnt byte
 		var e float64
@@ -382,6 +246,30 @@ func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
 			} else {
 				d.lastStreamFN = fn
 			}
+		}
+	case typ == EOTMarker && d.syncedType == StreamSync:
+		log.Printf("[DEBUG] Received EOTMarker, type: %x", typ)
+		if d.gotLSF {
+			d.streamFN = uint16(d.lastStreamFN+1) | 0x8000
+			d.sendToNetwork(d.lsf, emptyFrameData, d.streamID, d.streamFN)
+			if d.dashLog != nil {
+				log.Printf("[DEBUG] EOT for RF voice stream %04x", d.streamID)
+				d.dashLog.Info("", "type", "RF", "subtype", "Voice End", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", 0)
+			}
+		}
+		// reset
+		d.reset()
+	}
+	//RX sync timeout
+	if d.syncedType != 0 {
+		d.timeoutCnt++
+		if d.timeoutCnt > 960*2 {
+			if d.dashLog != nil && d.gotLSF && d.lastStreamFN&0x8000 != 0x8000 {
+				// If we timed out of a voice stream without a last frame, send the Voice End here
+				log.Printf("[DEBUG] Timed out RF voice stream %04x", d.streamID)
+				d.dashLog.Info("", "type", "RF", "subtype", "Voice End", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", 0)
+			}
+			d.reset()
 		}
 	}
 }
