@@ -12,31 +12,32 @@ import (
 	"time"
 
 	"go.bug.st/serial"
+	"gopkg.in/ini.v1"
 )
 
 // CC1200 commands
 const (
-	cmdPing = iota
+	cc1200CmdPing = iota
 	//SET
-	cmdSetRXFreq
-	cmdSetTXFreq
-	cmdSetTXPower
-	cmdSetReserved
-	cmdSetFreqCorr
-	cmdSetAFC
-	cmdSetTXStart
-	cmdSetRX
+	cc1200CmdSetRXFreq
+	cc1200CmdSetTXFreq
+	cc1200CmdSetTXPower
+	cc1200CmdSetReserved
+	cc1200CmdSetFreqCorr
+	cc1200CmdSetAFC
+	cc1200CmdSetTXStart
+	cc1200CmdSetRX
 )
 
 // const (
 //
 //	//GET
-//	cmdGetIdent = iota + 0x80
-//	cmdGetCaps
-//	cmdGetRXFreq
-//	cmdGetTXFreq
-//	cmdGetTXPower
-//	cmdGetFreqCorr
+//	cc1200CmdGetIdent = iota + 0x80
+//	cc1200CmdGetCaps
+//	cc1200CmdGetRXFreq
+//	cc1200CmdGetTXFreq
+//	cc1200CmdGetTXPower
+//	cc1200CmdGetFreqCorr
 //
 // )
 
@@ -73,11 +74,29 @@ type CC1200Modem struct {
 }
 
 func NewCC1200Modem(
-	port string,
-	nRSTPin int,
-	paEnablePin int,
-	boot0Pin int,
-	baudRate int) (*CC1200Modem, error) {
+	rxFrequency uint32,
+	txFrequency uint32,
+	power float32,
+	frequencyCorr int16,
+	afc bool,
+	modemCfg *ini.Section) (*CC1200Modem, error) {
+	port := modemCfg.Key("Port").String()
+	baudRate, baudRateErr := modemCfg.Key("Speed").Int()
+	nRSTPin, nRSTPinErr := modemCfg.Key("NRSTPin").Int()
+	paEnablePin, paEnablePinErr := modemCfg.Key("PAEnablePin").Int()
+	boot0Pin, boot0PinErr := modemCfg.Key("Boot0Pin").Int()
+
+	var err error
+	err = errors.Join(
+		baudRateErr,
+		nRSTPinErr,
+		paEnablePinErr,
+		boot0PinErr,
+	)
+	if err != nil {
+		return nil, err
+	}
+
 	ret := &CC1200Modem{
 		rxSymbols: make(chan float32),
 		s2s:       NewSymbolToSample(rrcTaps5, TXSymbolScalingCoeff*transmitGain, false, 5),
@@ -92,7 +111,6 @@ func NewCC1200Modem(
 	// Stop it until we transmit
 	ret.txTimer.Stop()
 	ret.txState = txIdle
-	var err error
 	fi, err := os.Stat(port)
 	if err != nil {
 		return nil, fmt.Errorf("modem stat: %w", err)
@@ -124,7 +142,7 @@ func NewCC1200Modem(
 		return nil, fmt.Errorf("rx pipeline setup: %w", err)
 	}
 	go ret.processReceivedData(rxSource)
-	_, err = ret.commandWithResponse([]byte{cmdPing, 2})
+	_, err = ret.commandWithResponse([]byte{cc1200CmdPing, 2})
 	if err != nil {
 		return nil, fmt.Errorf("test PING: %w", err)
 	}
@@ -134,6 +152,12 @@ func NewCC1200Modem(
 	// } else {
 	// 	log.Printf("[DEBUG] Opened debug log: %v", ret.debugLog)
 	// }
+	ret.setRXFreq(rxFrequency)
+	ret.setTXFreq(txFrequency)
+	ret.setTXPower(power)
+	ret.setFreqCorrection(frequencyCorr)
+	ret.setAFC(afc)
+
 	return ret, nil
 }
 
@@ -223,31 +247,6 @@ func (m *CC1200Modem) processSymbols() {
 			symbols = symbols[1:]
 		}
 	}
-}
-
-func extractPayload(dist float32, typ uint16, symbols []Symbol) ([]Symbol, []SoftBit, float32) {
-	offset := 0
-	for i := range 2 {
-		d, t := syncDistance(symbols, i+1)
-		if t == typ && d < dist {
-			dist = d
-			offset = i + 1
-		}
-	}
-	// skip offset
-	symbols = symbols[offset:]
-	// skip past sync
-	symbols = symbols[16*5:]
-	pld := make([]Symbol, SymbolsPerPayload)
-	for i := range pld {
-		pld[i] = symbols[i*5]
-	}
-	softBits := calcSoftbits(pld)
-	// log.Printf("[DEBUG] pld: % .2f", pld)
-	// skip by most, but not all of the payload
-	// if we skip everything we miss the next packet for some reason.
-	symbols = symbols[(SymbolsPerPayload-offset-16)*5:]
-	return symbols, softBits, dist
 }
 
 func (m *CC1200Modem) rxPipeline(sampleSource chan int8) (chan float32, error) {
@@ -356,7 +355,7 @@ func (m *CC1200Modem) TransmitPacket(p Packet) error {
 	chunkCnt := 0
 	packetData := p.PayloadBytes()
 	for bytesLeft := len(packetData); bytesLeft > 0; bytesLeft -= 25 {
-		syms = AppendSyncword(syms, PacketSync)
+		syms = AppendSyncwordSymbols(syms, PacketSync)
 		chunk := make([]byte, 25+1) // 25 bytes from the packet plus 6 bits of metadata
 		if bytesLeft > 25 {
 			// not the last chunk
@@ -377,7 +376,7 @@ func (m *CC1200Modem) TransmitPacket(p Packet) error {
 		if err != nil {
 			return fmt.Errorf("unable to encode packet: %w", err)
 		}
-		encodedBits := NewBits(b)
+		encodedBits := NewPayloadBits(b)
 		rfBits := InterleaveBits(encodedBits)
 		rfBits = RandomizeBits(rfBits)
 		// Append chunk to the output
@@ -472,60 +471,9 @@ func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
 	return nil
 }
 
-func generateLSFSymbols(l LSF) ([]Symbol, error) {
-	syms := AppendSyncword(nil, LSFSync)
-
-	b, err := ConvolutionalEncode(l.ToBytes(), LSFPuncturePattern, LSFFinalBit)
-	if err != nil {
-		return nil, fmt.Errorf("unable to encode LSF: %w", err)
-	}
-	encodedBits := NewBits(b)
-	// encodedBits[0:len(b)] = b[:]
-	rfBits := InterleaveBits(encodedBits)
-	rfBits = RandomizeBits(rfBits)
-	// Append LSF to the output
-	syms = AppendBits(syms, rfBits)
-	return syms, nil
-}
-
-func generateStreamSymbols(sd StreamDatagram) ([]Symbol, error) {
-	syms := AppendSyncword(nil, StreamSync)
-	lich := extractLICH(int((sd.FrameNumber&0x7fff)%6), sd.LSF)
-	encodedLICH := EncodeLICH(lich)
-	lichBits := unpackBits(encodedLICH)
-	b, err := ConvolutionalEncodeStream(lichBits, sd)
-	if err != nil {
-		return syms, fmt.Errorf("encode stream: %w", err)
-	}
-	encodedBits := NewBits(b)
-	rfBits := InterleaveBits(encodedBits)
-	rfBits = RandomizeBits(rfBits)
-	syms = AppendBits(syms, rfBits)
-	// log.Printf("[DEBUG] len(syms): %d, syms: [% v]", len(syms), syms)
-	// d := NewDecoder()
-	// frameData, li, fn, lichCnt, vd := d.decodeStreamFrame(syms[8:])
-	// log.Printf("[DEBUG] frameData: [% 2x], lich: %x, lichCnt: %d, fn: %x, FN: %d, vd: %1.1f", frameData, li, lichCnt, fn, (fn>>8)|((fn&0xFF)<<8), vd)
-	return syms, nil
-}
-
-func extractLICH(lichCnt int, lsf LSF) []byte {
-	lich := lsf.ToBytes()[lichCnt*5 : lichCnt*5+5]
-	return append(lich, byte(lichCnt)<<5)
-}
-
-func unpackBits(in []byte) []Bit {
-	bits := make([]Bit, 8*len(in))
-	for i := range in {
-		for j := range 8 {
-			bits[i*8+j].Set((in[i] >> (7 - j)) & 1)
-		}
-	}
-
-	return bits
-}
 func (m *CC1200Modem) startTX() error {
 	log.Printf("[DEBUG] startTX()")
-	err := m.command([]byte{cmdSetTXStart, 2})
+	err := m.command([]byte{cc1200CmdSetTXStart, 2})
 	if err != nil {
 		return fmt.Errorf("start TX: %w", err)
 	}
@@ -558,10 +506,10 @@ func (m *CC1200Modem) stopTX() {
 	m.txTimer.Stop()
 }
 
-func (m *CC1200Modem) SetTXFreq(freq uint32) error {
-	log.Printf("[DEBUG] SetTXFreq(%v)", freq)
+func (m *CC1200Modem) setTXFreq(freq uint32) error {
+	log.Printf("[DEBUG] setTXFreq(%v)", freq)
 	var err error
-	cmd := []byte{cmdSetTXFreq, 0}
+	cmd := []byte{cc1200CmdSetTXFreq, 0}
 	cmd, err = binary.Append(cmd, binary.LittleEndian, freq)
 	if err != nil {
 		return fmt.Errorf("encode set TX freq: %w", err)
@@ -572,10 +520,10 @@ func (m *CC1200Modem) SetTXFreq(freq uint32) error {
 	}
 	return nil
 }
-func (m *CC1200Modem) SetTXPower(dbm float32) error {
-	log.Printf("[DEBUG] SetTXPower(%v)", dbm)
+func (m *CC1200Modem) setTXPower(dbm float32) error {
+	log.Printf("[DEBUG] setTXPower(%v)", dbm)
 	var err error
-	cmd := []byte{cmdSetTXPower, 0}
+	cmd := []byte{cc1200CmdSetTXPower, 0}
 	cmd, err = binary.Append(cmd, binary.LittleEndian, int8(dbm*4))
 	if err != nil {
 		return fmt.Errorf("encode set TX power: %w", err)
@@ -596,7 +544,7 @@ func (m *CC1200Modem) Start() error {
 	m.mutex.Unlock()
 	m.clearResponseBuf()
 	var err error
-	cmd := []byte{cmdSetRX, 0, 1}
+	cmd := []byte{cc1200CmdSetRX, 0, 1}
 	log.Printf("[DEBUG] sending start cmd")
 	err = m.command(cmd)
 	if err != nil {
@@ -613,7 +561,7 @@ func (m *CC1200Modem) stopRX() error {
 		m.mutex.Unlock()
 		log.Printf("[DEBUG] stopRX()")
 		var err error
-		cmd := []byte{cmdSetRX, 0, 0}
+		cmd := []byte{cc1200CmdSetRX, 0, 0}
 		// Theoretically this returns a response, but how to find it in the received data
 		err = m.command(cmd)
 		if err != nil {
@@ -626,10 +574,10 @@ func (m *CC1200Modem) stopRX() error {
 	m.mutex.Unlock()
 	return nil
 }
-func (m *CC1200Modem) SetRXFreq(freq uint32) error {
-	log.Printf("[DEBUG] SetRXFreq(%v)", freq)
+func (m *CC1200Modem) setRXFreq(freq uint32) error {
+	log.Printf("[DEBUG] setRXFreq(%v)", freq)
 	var err error
-	cmd := []byte{cmdSetRXFreq, 0}
+	cmd := []byte{cc1200CmdSetRXFreq, 0}
 	cmd, err = binary.Append(cmd, binary.LittleEndian, freq)
 	if err != nil {
 		return fmt.Errorf("encode set RX freq: %w", err)
@@ -640,24 +588,24 @@ func (m *CC1200Modem) SetRXFreq(freq uint32) error {
 	}
 	return nil
 }
-func (m *CC1200Modem) SetAFC(afc bool) error {
-	log.Printf("[DEBUG] SetAFC(%v)", afc)
+func (m *CC1200Modem) setAFC(afc bool) error {
+	log.Printf("[DEBUG] setAFC(%v)", afc)
 	var err error
 	var a byte
 	if afc {
 		a = 1
 	}
-	cmd := []byte{cmdSetAFC, 0, a}
+	cmd := []byte{cc1200CmdSetAFC, 0, a}
 	err = m.commandWithErrResponse(cmd)
 	if err != nil {
 		return fmt.Errorf("send set AFC: %w", err)
 	}
 	return nil
 }
-func (m *CC1200Modem) SetFreqCorrection(corr int16) error {
-	log.Printf("[DEBUG] SetFreqCorrection(%v)", corr)
+func (m *CC1200Modem) setFreqCorrection(corr int16) error {
+	log.Printf("[DEBUG] setFreqCorrection(%v)", corr)
 	var err error
-	cmd := []byte{cmdSetFreqCorr, 0}
+	cmd := []byte{cc1200CmdSetFreqCorr, 0}
 	cmd, err = binary.Append(cmd, binary.LittleEndian, corr)
 	if err != nil {
 		return fmt.Errorf("encode set freq corr: %w", err)

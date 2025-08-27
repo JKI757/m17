@@ -17,6 +17,14 @@ const (
 	EOTMarker  = uint16(0x555D)
 )
 
+var (
+	LSFSyncBytes    = []byte{0x55, 0xF7}
+	StreamSyncBytes = []byte{0xFF, 0x5D}
+	PacketSyncBytes = []byte{0x75, 0xFF}
+	BERTSyncBytes   = []byte{0xDF, 0x55}
+	EOTMarkerBytes  = []byte{0x55, 0x5D}
+)
+
 var emptyFrameData = []byte{
 	0, 0, 0, 0, 0, 0, 0, 0,
 	0, 0, 0, 0, 0, 0, 0, 0,
@@ -62,7 +70,6 @@ func NewDecoder(dashLog *slog.Logger, sendToNetwork func(lsf *LSF, payload []byt
 func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
 	switch {
 	case typ == LSFSync && d.syncedType == 0:
-		log.Printf("[DEBUG] Received LSFSync, type: %x", typ)
 		d.gotLSF = false
 		var e float64
 		d.lsf, e = decodeLSF(softBits)
@@ -121,7 +128,6 @@ func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
 		}
 
 	case typ == PacketSync && d.syncedType == PacketSync:
-		log.Printf("[DEBUG] Received PacketSync, type: %x", typ)
 		pktFrame, e := d.decodePacketFrame(softBits)
 		// log.Printf("[DEBUG] pktFrame: % x", pktFrame)
 		lastFrame := (pktFrame[25] >> 7) != 0
@@ -171,7 +177,6 @@ func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
 		}
 
 	case typ == StreamSync:
-		log.Printf("[DEBUG] Received StreamSync, type: %x", typ)
 		var lich []byte
 		var lichCnt byte
 		var e float64
@@ -248,7 +253,6 @@ func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
 			}
 		}
 	case typ == EOTMarker && d.syncedType == StreamSync:
-		log.Printf("[DEBUG] Received EOTMarker, type: %x", typ)
 		if d.gotLSF {
 			d.streamFN = uint16(d.lastStreamFN+1) | 0x8000
 			d.sendToNetwork(d.lsf, emptyFrameData, d.streamID, d.streamFN)
@@ -276,7 +280,6 @@ func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
 
 func decodeLSF(softBit []SoftBit) (*LSF, float64) {
 	// log.Printf("[DEBUG] decodeLSF: len(pld): %d", len(pld))
-	// softBit := calcSoftbits(pld)
 	// log.Printf("[DEBUG] softBit: %#v", softBit)
 
 	//derandomize

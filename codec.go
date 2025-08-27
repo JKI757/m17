@@ -35,6 +35,14 @@ const (
 type Symbol float32
 type SoftBit uint16
 
+func (b SoftBit) String() string {
+	if b == 0 {
+		return "0"
+	} else {
+		return "1"
+	}
+}
+
 var (
 	// TX symbols
 	SymbolMap = []Symbol{+1, +3, -1, -3}
@@ -71,11 +79,11 @@ func (b *Bit) Set(by byte) {
 	*b = by != 0
 }
 
-type Bits [BitsPerPayload]Bit
+type PayloadBits [BitsPerPayload]Bit
 
-func NewBits(bs *[]Bit) *Bits {
-	var bits Bits
-	copy(bits[:], *bs)
+func NewPayloadBits(bs []Bit) *PayloadBits {
+	var bits PayloadBits
+	copy(bits[:], bs)
 	return &bits
 }
 
@@ -184,8 +192,8 @@ func AppendPreamble(out []Symbol, typ Preamble) []Symbol {
 	return out
 }
 
-// AppendSyncword generates the symbol stream for a syncword.
-func AppendSyncword(out []Symbol, syncword uint16) []Symbol {
+// AppendSyncwordSymbols generates the symbol stream for a syncword.
+func AppendSyncwordSymbols(out []Symbol, syncword uint16) []Symbol {
 	for i := 0; i < SymbolsPerSyncword*2; i += 2 {
 		out = append(out, SymbolMap[(syncword>>(14-i))&3])
 	}
@@ -219,8 +227,8 @@ var interleaveSequence = [BitsPerPayload]uint16{
 }
 
 // Interleave payload bits.
-func InterleaveBits(in *Bits) *Bits {
-	var out Bits
+func InterleaveBits(in *PayloadBits) *PayloadBits {
+	var out PayloadBits
 	for i := 0; i < SymbolsPerPayload*2; i++ {
 		out[i] = in[interleaveSequence[i]]
 	}
@@ -242,7 +250,7 @@ var randomizeSeq = []byte{
 	0x57, 0x18, 0x2D, 0x29, 0x78, 0xC3,
 }
 
-func RandomizeBits(bits *Bits) *Bits {
+func RandomizeBits(bits *PayloadBits) *PayloadBits {
 	for i := 0; i < len(bits); i++ {
 		if ((randomizeSeq[i/8] >> (7 - (i % 8))) & 1) != 0 {
 			// flip bit
@@ -260,7 +268,7 @@ func DerandomizeSoftBits(softBits []SoftBit) []SoftBit {
 	return softBits
 }
 
-func AppendBits(out []Symbol, data *Bits) []Symbol {
+func AppendBits(out []Symbol, data *PayloadBits) []Symbol {
 	for i := 0; i < SymbolsPerPayload; i++ { //40ms * 4800 - 8 (syncword)
 		d := 0
 		if data[2*i+1] {
@@ -288,7 +296,7 @@ func AppendEOT(out []Symbol) []Symbol {
 // in 				Input bytes
 // puncturePattern 	the puncture pattern to use
 // finalBit 		The last bit of the final byte to encode. A number between 0 and 7. (That is, the number of bits from the last byte to use minus one.)
-func ConvolutionalEncode(in []byte, puncturePattern PuncturePattern, finalBit byte) (*[]Bit, error) {
+func ConvolutionalEncode(in []byte, puncturePattern PuncturePattern, finalBit byte) ([]Bit, error) {
 	if len(in) == 0 {
 		return nil, errors.New("empty input not allowed")
 	}
@@ -334,19 +342,19 @@ func ConvolutionalEncode(in []byte, puncturePattern PuncturePattern, finalBit by
 	}
 	// log.Printf("[DEBUG] len(out): %d", len(out))
 
-	return &out, nil
+	return out, nil
 }
 
-func ConvolutionalEncodeStream(lichBits []Bit, sd StreamDatagram) (*[]Bit, error) {
+func ConvolutionalEncodeStream(lichBits []Bit, sd StreamDatagram) ([]Bit, error) {
 	frame, err := binary.Append(nil, binary.LittleEndian, sd.FrameNumber)
 	if err != nil {
 		return nil, fmt.Errorf("append frame number: %w", err)
 	}
 	frame = append(frame, sd.Payload[:]...)
 	frameBits, err := ConvolutionalEncode(frame, StreamPuncturePattern, 7)
-	bits := append(lichBits, *frameBits...)
+	bits := append(lichBits, frameBits...)
 
-	return &bits, err
+	return bits, err
 }
 
 type ViterbiDecoder struct {
