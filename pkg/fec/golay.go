@@ -1,4 +1,4 @@
-package m17
+package fec
 
 // Package golay implements Golay(24,12) error correction codes
 // compatible with the M17 digital radio protocol.
@@ -12,8 +12,12 @@ package m17
 // presence of uncertain or erased bits.
 
 import (
-	"fmt"
+    "fmt"
 )
+
+// SoftBit represents a soft-valued bit as a 16-bit confidence value.
+// Higher values indicate stronger confidence in bit=1.
+type SoftBit = uint16
 
 // Constants for soft-decision logic
 const (

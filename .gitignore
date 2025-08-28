@@ -1,11 +1,3 @@
-cmd/m17-text-cli/m17-text-cli
-cmd/m17-gateway/m17-gateway
-cmd/m17-gateway/m17-gateway.ini
-cmd/m17-gateway/build/
-cmd/m17-message/m17-message
-cmd/m17-message/m17-message.app/
-cmd/m17-message/wasm/
-cmd/m17-message/m17-message.apk
-cmd/modem-emulator/modem-emulator
+bin/
 misc/
 .DS_Store

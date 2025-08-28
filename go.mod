@@ -1,17 +1,18 @@
 module github.com/jancona/m17
 
-go 1.24
+go 1.24.0
 
 require github.com/hashicorp/logutils v1.0.0
 
-require github.com/sigurn/crc16 v0.0.0-20240131213347-83fcde1e29d1
+// m17 core packages now live under pkg/m17 and are direct deps
 
 require (
 	fyne.io/fyne/v2 v2.5.5
 	github.com/icza/gog v0.0.0-20241010132004-5da24f18211d
+	github.com/sigurn/crc16 v0.0.0-20240131213347-83fcde1e29d1
 	github.com/warthog618/go-gpiocdev v0.9.1
 	go.bug.st/serial v1.6.2
-	golang.org/x/exp v0.0.0-20250228200357-dead58393ab7
+	golang.org/x/exp v0.0.0-20250819193227-8b4c13bb791b
 	gopkg.in/ini.v1 v1.67.0
 )
 

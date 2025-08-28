@@ -1,12 +1,12 @@
 package main
 
 import (
-	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/container"
-	"fyne.io/fyne/v2/dialog"
-	"fyne.io/fyne/v2/theme"
-	"fyne.io/fyne/v2/widget"
-	"github.com/jancona/m17"
+    "fyne.io/fyne/v2"
+    "fyne.io/fyne/v2/container"
+    "fyne.io/fyne/v2/dialog"
+    "fyne.io/fyne/v2/theme"
+    "fyne.io/fyne/v2/widget"
+    protocol "github.com/jancona/m17/pkg/protocol"
 )
 
 type ui struct {
@@ -123,7 +123,7 @@ func (u *ui) addChannel(w fyne.Window, a fyne.App, f func(*channel) widget.ListI
 				return
 			}
 			var ch channel
-			ch.name = m17.NormalizeCallsignModule(ce.Text)
+            ch.name = protocol.NormalizeCallsignModule(ce.Text)
 			ch.id = ch.name
 			id := f(&ch)
 			u.setChannel(u.currentServer.channels[id])

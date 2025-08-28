@@ -1,21 +1,22 @@
 package main
 
 import (
-	"embed"
-	"errors"
-	"fmt"
-	"log"
-	"net"
-	"os"
-	"regexp"
-	"strconv"
-	"strings"
-	"time"
+    "embed"
+    "errors"
+    "fmt"
+    "log"
+    "net"
+    "os"
+    "regexp"
+    "strconv"
+    "strings"
+    "time"
 
-	"fyne.io/fyne/v2"
-	"fyne.io/fyne/v2/data/validation"
-	"fyne.io/fyne/v2/widget"
-	"github.com/jancona/m17"
+    "fyne.io/fyne/v2"
+    "fyne.io/fyne/v2/data/validation"
+    "fyne.io/fyne/v2/widget"
+    protocol "github.com/jancona/m17/pkg/protocol"
+    relay "github.com/jancona/m17/pkg/relay"
 )
 
 const (
@@ -43,7 +44,7 @@ type m17Server struct {
 	host     string
 	port     uint
 	module   string
-	relay    *m17.Relay
+    relay    *relay.Relay
 }
 
 func initM17Server(a fyne.App) service {
@@ -84,7 +85,7 @@ func (s *m17Server) configure(u *ui) (fyne.CanvasObject, func(prefix string, a f
 	f.AppendItem(&widget.FormItem{Text: "Module", Widget: module})
 	return f,
 		func(prefix string, a fyne.App) {
-			s.callsign = m17.NormalizeCallsignModule(strings.ToUpper(callsign.Text))
+            s.callsign = protocol.NormalizeCallsignModule(strings.ToUpper(callsign.Text))
 			s.app.Preferences().SetString(prefix+prefM17CallsignKey, s.callsign)
 			s.app.Preferences().SetString(prefix+prefM17NameKey, name.Text)
 			s.app.Preferences().SetString(prefix+prefM17ServerKey, server.Text)
@@ -166,7 +167,7 @@ func (s *m17Server) send(ch *channel, text string) {
 	// s.relay.SendSMS(ch.name, s.callsign, text)
 	// Add a trailing NUL
 	msg := append([]byte(text), 0)
-	p, err := m17.NewPacket(ch.name, s.callsign, m17.PacketTypeSMS, []byte(msg))
+        p, err := protocol.NewPacket(ch.name, s.callsign, protocol.PacketTypeSMS, []byte(msg))
 	if err != nil {
 		fmt.Printf("Error creating Packet: %v\n", err)
 		return
@@ -191,14 +192,14 @@ var m17Handlers []func(ev *messageEvent)
 func addHandler(h func(ev *messageEvent)) {
 	m17Handlers = append(m17Handlers, h)
 }
-func (s *m17Server) handleM17(p m17.Packet) error {
+func (s *m17Server) handleM17(p protocol.Packet) error {
 	// // A packet is an LSF + type code 0x05 for SMS + data up to 823 bytes
 	// log.Printf("[DEBUG] p: %#v", p)
-	dst, err := m17.DecodeCallsign(p.LSF.Dst[:])
+    dst, err := protocol.DecodeCallsign(p.LSF.Dst[:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Bad dst callsign: %v", err)
 	}
-	src, err := m17.DecodeCallsign(p.LSF.Src[:])
+    src, err := protocol.DecodeCallsign(p.LSF.Src[:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Bad src callsign: %v", err)
 	}
@@ -206,7 +207,7 @@ func (s *m17Server) handleM17(p m17.Packet) error {
 	if len(p.Payload) > 0 {
 		msg = string(p.Payload[0 : len(p.Payload)-1])
 	}
-	if p.Type == m17.PacketTypeSMS && (dst == s.callsign || dst == m17.DestinationAll || dst[0:1] == "#") {
+    if p.Type == protocol.PacketTypeSMS && (dst == s.callsign || dst == protocol.DestinationAll || dst[0:1] == "#") {
 		fmt.Printf("%s %s>%s: %s\n", time.Now().Format(time.DateTime), src, dst, msg)
 		chName := src
 		if strings.HasPrefix(dst, "@") || strings.HasPrefix(dst, "#") {
@@ -242,7 +243,7 @@ func (s *m17Server) login(prefix string, u *ui) {
 func (s *m17Server) doConnect(name string, server string, port uint, module string, u *ui) {
 	var err error
 	log.Printf("Connecting to %s, %s:%d %s, callsign %s", name, server, port, module, s.callsign)
-	s.relay, err = m17.NewRelay(name, server, port, module, s.callsign, nil, s.handleM17, nil)
+    s.relay, err = relay.NewRelay(name, server, port, module, s.callsign, nil, s.handleM17, nil)
 	if err != nil {
 		log.Printf("fail to connect create client: %v", err)
 	}

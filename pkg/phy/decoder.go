@@ -1,14 +1,16 @@
-package m17
+package phy
 
 import (
-	"encoding/binary"
-	"encoding/json"
-	"fmt"
-	"io"
-	"log"
-	"log/slog"
-	"math/rand"
-	"time"
+    "encoding/binary"
+    "encoding/json"
+    "fmt"
+    "io"
+    "log"
+    "log/slog"
+    "math/rand"
+    "time"
+    fecpkg "github.com/jancona/m17/pkg/fec"
+    protocol "github.com/jancona/m17/pkg/protocol"
 )
 
 const (
@@ -36,9 +38,9 @@ var emptyFrameData = []byte{
 }
 
 type Decoder struct {
-	syncedType uint16
+    syncedType uint16
 
-	lsf *LSF
+    lsf *protocol.LSF
 
 	frameData  []byte //decoded frame data, 206 bits, plus 4 flushing bits
 	packetData []byte //whole packet data
@@ -69,7 +71,7 @@ func NewDecoder(dashLog *slog.Logger) *Decoder {
 	}
 	return &d
 }
-func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, payload []byte, sid, fn uint16) error) error {
+func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *protocol.LSF, payload []byte, sid, fn uint16) error) error {
 	var symbols []Symbol
 	var err error
 
@@ -114,8 +116,8 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 				d.lastStreamFN = 0xffff
 				d.lastPacketFN = 0xff
 
-				if d.lsf.Type[1]&byte(LSFTypeStream) == byte(LSFTypeStream) {
-					d.syncedType = StreamSync
+            if d.lsf.Type[1]&byte(protocol.LSFTypeStream) == byte(protocol.LSFTypeStream) {
+                d.syncedType = StreamSync
 					d.lichParts = 0
 					d.streamFN = 0
 					d.streamID = uint16(rand.Intn(0x10000))
@@ -198,12 +200,12 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 				copy(d.packetData[(d.lastPacketFN+1)*25:(d.lastPacketFN+1)*25+frameNumOrByteCnt], pktFrame[:frameNumOrByteCnt])
 				d.packetData = d.packetData[:(d.lastPacketFN+1)*25+frameNumOrByteCnt]
 				// fprintf(stderr, " \033[93mContent\033[39m\n");
-				if CRC(d.packetData) == 0 {
-					// log.Printf("[DEBUG] d.lsf: %v, d.packetData: %v", d.lsf, d.packetData)
-					sendToNetwork(d.lsf, d.packetData, 0, 0)
-					p := NewPacketFromBytes(append(d.lsf.ToBytes(), d.packetData...))
-					if d.dashLog != nil {
-						if p.Type == PacketTypeSMS && len(p.Payload) > 0 {
+        if fecpkg.CRC(d.packetData) == 0 {
+                    // log.Printf("[DEBUG] d.lsf: %v, d.packetData: %v", d.lsf, d.packetData)
+                    sendToNetwork(d.lsf, d.packetData, 0, 0)
+                    p := protocol.NewPacketFromBytes(append(d.lsf.ToBytes(), d.packetData...))
+                    if d.dashLog != nil {
+                        if p.Type == protocol.PacketTypeSMS && len(p.Payload) > 0 {
 							msg := string(p.Payload[0 : len(p.Payload)-1])
 							d.dashLog.Info("", "type", "RF", "subtype", "Packet", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", json.Number(fmt.Sprintf("%f", e)), "packetType", p.Type, "smsMessage", msg)
 						} else {
@@ -211,7 +213,7 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 						}
 					}
 				} else {
-					log.Printf("[DEBUG] Bad CRC not forwarded: %x", CRC(d.packetData))
+                log.Printf("[DEBUG] Bad CRC not forwarded: %x", fecpkg.CRC(d.packetData))
 				}
 				// cleanup
 				d.reset()
@@ -237,7 +239,7 @@ func (d *Decoder) DecodeSymbols(in io.Reader, sendToNetwork func(lsf *LSF, paylo
 					d.lichParts |= (1 << lichCnt)
 					if d.lichParts == 0x3F {
 						d.lichParts = 0
-						lsfB := NewLSFFromBytes(d.lsfBytes)
+                    lsfB := protocol.NewLSFFromBytes(d.lsfBytes)
 						if lsfB.CheckCRC() {
 							d.lsf = &lsfB
 							d.gotLSF = true
@@ -370,7 +372,7 @@ func (d *Decoder) extractPayload(dist float32, typ uint16, symbols []Symbol) ([]
 	return symbols, pld, dist, nil
 }
 
-func decodeLSF(pld []Symbol) (*LSF, float64) {
+func decodeLSF(pld []Symbol) (*protocol.LSF, float64) {
 	// log.Printf("[DEBUG] decodeLSF: len(pld): %d", len(pld))
 	softBit := calcSoftbits(pld)
 	// log.Printf("[DEBUG] softBit: %#v", softBit)
@@ -380,7 +382,7 @@ func decodeLSF(pld []Symbol) (*LSF, float64) {
 	// log.Printf("[DEBUG] derandomized softBit: %#v", softBit)
 
 	//deinterleave
-	dSoftBit := DeinterleaveSoftBits(softBit)
+    dSoftBit := DeinterleaveSoftBits(softBit)
 	// log.Printf("[DEBUG] dSoftBit: %#v", dSoftBit)
 
 	//decode
@@ -389,25 +391,25 @@ func decodeLSF(pld []Symbol) (*LSF, float64) {
 
 	//shift the buffer 1 position left - get rid of the encoded flushing bits
 	// copy(lsf, lsf[1:])
-	lsf = lsf[1 : LSFLen+1]
+    lsf = lsf[1 : protocol.LSFLen+1]
 	// log.Printf("[DEBUG] lsf: %x", lsf)
-	if CRC(lsf) != 0 {
-		log.Printf("[DEBUG] Bad LSF CRC: %x", CRC(lsf))
-	} else {
-		dst, err := DecodeCallsign(lsf[0:6])
-		if err != nil {
-			log.Printf("[ERROR] Bad dst callsign: %v", err)
-		}
-		src, err := DecodeCallsign(lsf[6:12])
-		if err != nil {
-			log.Printf("[ERROR] Bad src callsign: %v", err)
-		}
-		log.Printf("[DEBUG] dest: %s, src: %s", dst, src)
-	}
-	log.Printf("[DEBUG] LSF MER: %1.1f", e/softTrue)
-	l := NewLSFFromBytes(lsf)
-	return &l, e
-}
+        if fecpkg.CRC(lsf) != 0 {
+            log.Printf("[DEBUG] Bad LSF CRC: %x", fecpkg.CRC(lsf))
+        } else {
+            dst, err := protocol.DecodeCallsign(lsf[0:6])
+            if err != nil {
+                log.Printf("[ERROR] Bad dst callsign: %v", err)
+            }
+            src, err := protocol.DecodeCallsign(lsf[6:12])
+            if err != nil {
+                log.Printf("[ERROR] Bad src callsign: %v", err)
+            }
+            log.Printf("[DEBUG] dest: %s, src: %s", dst, src)
+        }
+        log.Printf("[DEBUG] LSF MER: %1.1f", e/softTrue)
+        l := protocol.NewLSFFromBytes(lsf)
+        return &l, e
+    }
 
 func (d *Decoder) decodeStreamFrame(pld []Symbol) (frameData []byte, lich []byte, fn uint16, lichCnt byte, e float64) {
 	// log.Printf("[DEBUG] decodeStreamFrame: len(pld): %d", len(pld))
@@ -423,7 +425,7 @@ func (d *Decoder) decodeStreamFrame(pld []Symbol) (frameData []byte, lich []byte
 	//deinterleave
 	dSoftBit := DeinterleaveSoftBits(softBit)
 	// log.Printf("[DEBUG] deinterleaved softBit: [% 04x]", dSoftBit)
-	lich = DecodeLICH(dSoftBit[:96])
+    lich = fecpkg.DecodeLICH(dSoftBit[:96])
 	lichCnt = lich[5] >> 5
 
 	//decode

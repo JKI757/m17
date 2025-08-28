@@ -1,11 +1,11 @@
-package m17
+package phy
 
 import (
-	"container/ring"
-	"fmt"
-	"math"
+    "container/ring"
+    "fmt"
+    "math"
 
-	"golang.org/x/exp/constraints"
+    "golang.org/x/exp/constraints"
 )
 
 const (
@@ -23,7 +23,8 @@ const (
 	TXSymbolScalingCoeff = (0.8 / ((40.0e3 / 2097152) * 0xAD) * 64.0)
 )
 
-var transmitGain = float32(math.Sqrt(5))
+// TransmitGain is a scaling factor used when converting symbols to samples.
+var TransmitGain = float32(math.Sqrt(5))
 
 // alpha=0.5, span=8, sps=10, gain=sqrt(sps)
 // var rrcTaps10 = []float32{
@@ -111,7 +112,8 @@ var transmitGain = float32(math.Sqrt(5))
 // }
 
 // alpha=0.5, span=8, sps=5, gain=sqrt(sps)
-var rrcTaps5 = []float32{
+// RRCTaps5 are Root-Raised Cosine filter taps for 5 samples/symbol.
+var RRCTaps5 = []float32{
 	-0.004519384154389,
 	-0.002744505321971,
 	0.002187793653660,

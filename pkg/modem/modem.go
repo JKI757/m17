@@ -1,11 +1,13 @@
-package m17
+package modem
 
 import (
-	"encoding/binary"
-	"errors"
-	"fmt"
-	"io"
-	"log"
+    "encoding/binary"
+    "errors"
+    "fmt"
+    "io"
+    "log"
+    protocol "github.com/jancona/m17/pkg/protocol"
+    phy "github.com/jancona/m17/pkg/phy"
 )
 
 const (
@@ -18,16 +20,16 @@ const (
 )
 
 type Modem interface {
-	io.ReadCloser
-	TransmitPacket(Packet) error
-	TransmitVoiceStream(StreamDatagram) error
-	Start() error
-	Reset() error
-	SetAFC(afc bool) error
-	SetFreqCorrection(corr int16) error
-	SetRXFreq(freq uint32) error
-	SetTXFreq(freq uint32) error
-	SetTXPower(dbm float32) error
+    io.ReadCloser
+    TransmitPacket(protocol.Packet) error
+    TransmitVoiceStream(protocol.StreamDatagram) error
+    Start() error
+    Reset() error
+    SetAFC(afc bool) error
+    SetFreqCorrection(corr int16) error
+    SetRXFreq(freq uint32) error
+    SetTXFreq(freq uint32) error
+    SetTXPower(dbm float32) error
 }
 
 type DummyModem struct {
@@ -36,20 +38,20 @@ type DummyModem struct {
 	extra []byte
 }
 
-func (m *DummyModem) TransmitPacket(p Packet) error {
-	encoded, err := p.Encode()
-	if err != nil {
-		return err
-	}
-	err = binary.Write(m.Out, binary.LittleEndian, encoded)
-	if err != nil {
-		return fmt.Errorf("failed to send: %w", err)
-	}
-	return nil
+func (m *DummyModem) TransmitPacket(p protocol.Packet) error {
+    encoded, err := phy.EncodePacket(&p)
+    if err != nil {
+        return err
+    }
+    err = binary.Write(m.Out, binary.LittleEndian, encoded)
+    if err != nil {
+        return fmt.Errorf("failed to send: %w", err)
+    }
+    return nil
 }
 
-func (m *DummyModem) TransmitVoiceStream(sd StreamDatagram) error {
-	return nil
+func (m *DummyModem) TransmitVoiceStream(sd protocol.StreamDatagram) error {
+    return nil
 }
 
 func (m *DummyModem) Read(p []byte) (n int, err error) {

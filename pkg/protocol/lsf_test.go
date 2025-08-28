@@ -1,11 +1,12 @@
-package m17
+package protocol
 
 import (
-	"encoding/binary"
-	"reflect"
-	"testing"
+    "encoding/binary"
+    "reflect"
+    "testing"
 
-	"github.com/icza/gog"
+    "github.com/icza/gog"
+    fec "github.com/jancona/m17/pkg/fec"
 )
 
 func TestNewLSFFromBytes(t *testing.T) {
@@ -72,7 +73,7 @@ func TestNewLSFCRCFromBytes(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := NewLSFFromBytes(tt.args.buf); !got.CheckCRC() {
 				a := got.ToBytes()
-				crc := CRC(a[:LSFLen-CRCLen])
+            crc := fec.CRC(a[:LSFLen-fec.CRCLen])
 				crcb, _ := binary.Append(nil, binary.BigEndian, crc)
 				t.Errorf("NewLSFFromBytes().CRC = %v, want %v", got.CRC, crcb)
 			}
@@ -159,7 +160,7 @@ func TestLSF_CalcCRC(t *testing.T) {
 				Meta: [14]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff},
 				CRC:  [2]byte{0xcb, 0x4d},
 			},
-			CRC([]byte{0, 0, 1, 138, 146, 174, 0, 0, 75, 19, 209, 6, 0x0f, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}),
+                fec.CRC([]byte{0, 0, 1, 138, 146, 174, 0, 0, 75, 19, 209, 6, 0x0f, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}),
 		},
 		{"bad1",
 			fields{

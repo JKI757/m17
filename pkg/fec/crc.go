@@ -1,4 +1,4 @@
-package m17
+package fec
 
 import "github.com/sigurn/crc16"
 

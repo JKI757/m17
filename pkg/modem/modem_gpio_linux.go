@@ -1,6 +1,6 @@
 //go:build linux
 
-package m17
+package modem
 
 import (
 	"fmt"

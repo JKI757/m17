@@ -1,17 +1,20 @@
-package m17
+package modem
 
 import (
-	"encoding/binary"
-	"errors"
-	"fmt"
-	"io"
-	"log"
-	"net"
-	"os"
-	"sync"
-	"time"
+    "encoding/binary"
+    "errors"
+    "fmt"
+    "io"
+    "log"
+    "net"
+    "os"
+    "sync"
+    "time"
 
-	"go.bug.st/serial"
+    "go.bug.st/serial"
+    fecpkg "github.com/jancona/m17/pkg/fec"
+    phy "github.com/jancona/m17/pkg/phy"
+    protocol "github.com/jancona/m17/pkg/protocol"
 )
 
 // CC1200 commands
@@ -55,10 +58,10 @@ type Line interface {
 }
 
 type CC1200Modem struct {
-	modem     io.ReadWriteCloser
-	rxSymbols chan float32
-	// txSymbols chan float32
-	s2s SymbolToSample
+    modem     io.ReadWriteCloser
+    rxSymbols chan float32
+    // txSymbols chan float32
+    s2s phy.SymbolToSample
 
 	mutex                 sync.Mutex
 	txState               int  // protected by mutex
@@ -73,16 +76,16 @@ type CC1200Modem struct {
 }
 
 func NewCC1200Modem(
-	port string,
-	nRSTPin int,
-	paEnablePin int,
-	boot0Pin int,
-	baudRate int) (*CC1200Modem, error) {
-	ret := &CC1200Modem{
-		rxSymbols: make(chan float32),
-		s2s:       NewSymbolToSample(rrcTaps5, TXSymbolScalingCoeff*transmitGain, false, 5),
-		cmdSource: make(chan byte),
-	}
+    port string,
+    nRSTPin int,
+    paEnablePin int,
+    boot0Pin int,
+    baudRate int) (*CC1200Modem, error) {
+    ret := &CC1200Modem{
+        rxSymbols: make(chan float32),
+        s2s:       phy.NewSymbolToSample(phy.RRCTaps5, phy.TXSymbolScalingCoeff*phy.TransmitGain, false, 5),
+        cmdSource: make(chan byte),
+    }
 	ret.txTimer = time.AfterFunc(txTimeout, func() {
 		log.Printf("[DEBUG] TX timeout")
 		ret.stopTX()
@@ -170,11 +173,11 @@ func (m *CC1200Modem) processReceivedData(rxSource chan int8) {
 func (m *CC1200Modem) rxPipeline(sampleSource chan int8) (chan float32, error) {
 	// modem samples -> DC filter --> RRC filter & scale
 	var err error
-	dcf, err := NewDCFilter(sampleSource, len(rrcTaps5))
+    dcf, err := phy.NewDCFilter(sampleSource, len(phy.RRCTaps5))
 	if err != nil {
 		return nil, fmt.Errorf("dc filter: %w", err)
 	}
-	s2s := NewSampleToSymbol(dcf.Source(), rrcTaps5, RXSymbolScalingCoeff)
+    s2s := phy.NewSampleToSymbol(dcf.Source(), phy.RRCTaps5, phy.RXSymbolScalingCoeff)
 	// ds, err := NewDownsampler(s2s.Source(), 5, 0)
 	// if err != nil {
 	// 	return nil, fmt.Errorf("downsampler: %w", err)
@@ -284,16 +287,16 @@ func (m *CC1200Modem) Read(buf []byte) (n int, err error) {
 // 	return
 // }
 
-func (m *CC1200Modem) TransmitPacket(p Packet) error {
+func (m *CC1200Modem) TransmitPacket(p protocol.Packet) error {
 	log.Printf("[DEBUG] TransmitPacket: %v", p)
 	m.stopRX()
 	time.Sleep(2 * time.Millisecond)
 	m.startTX()
 	time.Sleep(10 * time.Millisecond)
 
-	var syms []Symbol
-	//fill preamble
-	syms = AppendPreamble(syms, lsfPreamble)
+    var syms []phy.Symbol
+    //fill preamble
+    syms = phy.AppendPreamble(syms, phy.LSFPreamble)
 	err := m.writeSymbols(syms)
 	if err != nil {
 		return fmt.Errorf("failed to send preamble: %w", err)
@@ -310,7 +313,7 @@ func (m *CC1200Modem) TransmitPacket(p Packet) error {
 	chunkCnt := 0
 	packetData := p.PayloadBytes()
 	for bytesLeft := len(packetData); bytesLeft > 0; bytesLeft -= 25 {
-		syms = AppendSyncword(syms, PacketSync)
+        syms = phy.AppendSyncword(syms, phy.PacketSync)
 		chunk := make([]byte, 25+1) // 25 bytes from the packet plus 6 bits of metadata
 		if bytesLeft > 25 {
 			// not the last chunk
@@ -327,15 +330,15 @@ func (m *CC1200Modem) TransmitPacket(p Packet) error {
 			}
 		}
 		//encode the packet chunk
-		b, err := ConvolutionalEncode(chunk, PacketPuncturePattern, PacketModeFinalBit)
+        b, err := phy.ConvolutionalEncode(chunk, phy.PacketPuncturePattern, phy.PacketModeFinalBit)
 		if err != nil {
 			return fmt.Errorf("unable to encode packet: %w", err)
 		}
-		encodedBits := NewBits(b)
-		rfBits := InterleaveBits(encodedBits)
-		rfBits = RandomizeBits(rfBits)
+        encodedBits := phy.NewBits(b)
+        rfBits := phy.InterleaveBits(encodedBits)
+        rfBits = phy.RandomizeBits(rfBits)
 		// Append chunk to the output
-		syms = AppendBits(syms, rfBits)
+        syms = phy.AppendBits(syms, rfBits)
 		err = m.writeSymbols(syms)
 		if err != nil {
 			return fmt.Errorf("failed to send: %w", err)
@@ -343,7 +346,7 @@ func (m *CC1200Modem) TransmitPacket(p Packet) error {
 		time.Sleep(40 * time.Millisecond)
 		chunkCnt++
 	}
-	syms = AppendEOT(syms)
+    syms = phy.AppendEOT(syms)
 	err = m.writeSymbols(syms)
 	if err != nil {
 		return fmt.Errorf("failed to send EOT: %w", err)
@@ -356,7 +359,7 @@ func (m *CC1200Modem) TransmitPacket(p Packet) error {
 	return nil
 }
 
-func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
+func (m *CC1200Modem) TransmitVoiceStream(sd protocol.StreamDatagram) error {
 	log.Printf("[DEBUG] TransmitVoiceStream id: %04x, fn: %04x, last: %v", sd.StreamID, sd.FrameNumber, sd.LastFrame)
 	m.mutex.Lock()
 	if m.txState != txTX {
@@ -369,14 +372,14 @@ func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
 		m.lastTXData = time.Now()
 		time.Sleep(10 * time.Millisecond)
 
-		var syms []Symbol
-		//fill preamble
-		syms = AppendPreamble(syms, lsfPreamble)
+        var syms []phy.Symbol
+        //fill preamble
+        syms = phy.AppendPreamble(syms, phy.LSFPreamble)
 		err := m.writeSymbols(syms)
 		if err != nil {
 			return fmt.Errorf("failed to send preamble: %w", err)
 		}
-		syms, err = generateLSFSymbols(sd.LSF)
+        syms, err = generateLSFSymbols(sd.LSF)
 		if err != nil {
 			return fmt.Errorf("failed to generate LSF symbols: %w", err)
 		}
@@ -384,7 +387,7 @@ func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
 		if err != nil {
 			return fmt.Errorf("failed to send LSF: %w", err)
 		}
-		syms, err = generateStreamSymbols(sd)
+        syms, err = generateStreamSymbols(sd)
 		if err != nil {
 			return fmt.Errorf("failed to generate LSF symbols: %w", err)
 		}
@@ -395,7 +398,7 @@ func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
 	} else {
 		m.mutex.Unlock()
 		// log.Printf("[DEBUG] Sending frame of stream %x, fn %d", sd.StreamID, sd.FrameNumber)
-		syms, err := generateStreamSymbols(sd)
+        syms, err := generateStreamSymbols(sd)
 		if err != nil {
 			return fmt.Errorf("failed to generate LSF symbols: %w", err)
 		}
@@ -408,7 +411,7 @@ func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
 	if sd.LastFrame {
 		// send EOT
 		log.Printf("[DEBUG] Sending EOT for stream %04x, fn %04x", sd.StreamID, sd.FrameNumber)
-		syms := AppendEOT(nil)
+        syms := phy.AppendEOT(nil)
 		err := m.writeSymbols(syms)
 		if err != nil {
 			return fmt.Errorf("failed to send EOT: %w", err)
@@ -426,35 +429,35 @@ func (m *CC1200Modem) TransmitVoiceStream(sd StreamDatagram) error {
 	return nil
 }
 
-func generateLSFSymbols(l LSF) ([]Symbol, error) {
-	syms := AppendSyncword(nil, LSFSync)
+func generateLSFSymbols(l protocol.LSF) ([]phy.Symbol, error) {
+    syms := phy.AppendSyncword(nil, phy.LSFSync)
 
-	b, err := ConvolutionalEncode(l.ToBytes(), LSFPuncturePattern, LSFFinalBit)
+    b, err := phy.ConvolutionalEncode(l.ToBytes(), phy.LSFPuncturePattern, phy.LSFFinalBit)
 	if err != nil {
 		return nil, fmt.Errorf("unable to encode LSF: %w", err)
 	}
-	encodedBits := NewBits(b)
+    encodedBits := phy.NewBits(b)
 	// encodedBits[0:len(b)] = b[:]
-	rfBits := InterleaveBits(encodedBits)
-	rfBits = RandomizeBits(rfBits)
+    rfBits := phy.InterleaveBits(encodedBits)
+    rfBits = phy.RandomizeBits(rfBits)
 	// Append LSF to the output
-	syms = AppendBits(syms, rfBits)
-	return syms, nil
+    syms = phy.AppendBits(syms, rfBits)
+    return syms, nil
 }
 
-func generateStreamSymbols(sd StreamDatagram) ([]Symbol, error) {
-	syms := AppendSyncword(nil, StreamSync)
+func generateStreamSymbols(sd protocol.StreamDatagram) ([]phy.Symbol, error) {
+    syms := phy.AppendSyncword(nil, phy.StreamSync)
 	lich := extractLICH(int((sd.FrameNumber&0x7fff)%6), sd.LSF)
-	encodedLICH := EncodeLICH(lich)
-	lichBits := unpackBits(encodedLICH)
-	b, err := ConvolutionalEncodeStream(lichBits, sd)
+    encodedLICH := fecpkg.EncodeLICH(lich)
+    lichBits := unpackBits(encodedLICH)
+    b, err := phy.ConvolutionalEncodeStream(lichBits, sd)
 	if err != nil {
 		return syms, fmt.Errorf("encode stream: %w", err)
 	}
-	encodedBits := NewBits(b)
-	rfBits := InterleaveBits(encodedBits)
-	rfBits = RandomizeBits(rfBits)
-	syms = AppendBits(syms, rfBits)
+    encodedBits := phy.NewBits(b)
+    rfBits := phy.InterleaveBits(encodedBits)
+    rfBits = phy.RandomizeBits(rfBits)
+    syms = phy.AppendBits(syms, rfBits)
 	// log.Printf("[DEBUG] len(syms): %d, syms: [% v]", len(syms), syms)
 	// d := NewDecoder()
 	// frameData, li, fn, lichCnt, vd := d.decodeStreamFrame(syms[8:])
@@ -462,20 +465,20 @@ func generateStreamSymbols(sd StreamDatagram) ([]Symbol, error) {
 	return syms, nil
 }
 
-func extractLICH(lichCnt int, lsf LSF) []byte {
-	lich := lsf.ToBytes()[lichCnt*5 : lichCnt*5+5]
-	return append(lich, byte(lichCnt)<<5)
+func extractLICH(lichCnt int, lsf protocol.LSF) []byte {
+    lich := lsf.ToBytes()[lichCnt*5 : lichCnt*5+5]
+    return append(lich, byte(lichCnt)<<5)
 }
 
-func unpackBits(in []byte) []Bit {
-	bits := make([]Bit, 8*len(in))
-	for i := range in {
-		for j := range 8 {
-			bits[i*8+j].Set((in[i] >> (7 - j)) & 1)
-		}
-	}
+func unpackBits(in []byte) []phy.Bit {
+    bits := make([]phy.Bit, 8*len(in))
+    for i := range in {
+        for j := range 8 {
+            bits[i*8+j].Set((in[i] >> (7 - j)) & 1)
+        }
+    }
 
-	return bits
+    return bits
 }
 func (m *CC1200Modem) startTX() error {
 	log.Printf("[DEBUG] startTX()")
@@ -622,7 +625,7 @@ func (m *CC1200Modem) SetFreqCorrection(corr int16) error {
 	}
 	return nil
 }
-func (m *CC1200Modem) writeSymbols(symbols []Symbol) error {
+func (m *CC1200Modem) writeSymbols(symbols []phy.Symbol) error {
 	buf := m.s2s.Transform(symbols)
 	if m.debugLog != nil {
 		_, err := m.debugLog.Write(buf)

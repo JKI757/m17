@@ -1,19 +1,23 @@
 package main
 
 import (
-	"errors"
-	"flag"
-	"fmt"
-	"log"
-	"log/slog"
-	"os"
-	"os/signal"
-	"syscall"
+    "errors"
+    "flag"
+    "fmt"
+    "log"
+    "log/slog"
+    "os"
+    "os/signal"
+    "syscall"
 
-	"github.com/hashicorp/logutils"
-	"github.com/jancona/m17"
-	"gopkg.in/ini.v1"
-	// _ "net/http/pprof"
+    "github.com/hashicorp/logutils"
+    hostfile "github.com/jancona/m17/pkg/hostfile"
+    modem "github.com/jancona/m17/pkg/modem"
+    phy "github.com/jancona/m17/pkg/phy"
+    protocol "github.com/jancona/m17/pkg/protocol"
+    relay "github.com/jancona/m17/pkg/relay"
+    "gopkg.in/ini.v1"
+    // _ "net/http/pprof"
 )
 
 type config struct {
@@ -37,8 +41,8 @@ type config struct {
 	boot0Pin         int
 	symbolsIn        *os.File
 	symbolsOut       *os.File
-	hostfile         *m17.Hostfile
-	overrideHostfile *m17.Hostfile
+    hostfile         *hostfile.Hostfile
+    overrideHostfile *hostfile.Hostfile
 }
 
 func loadConfig(iniFile string, inFile string, outFile string) (config, error) {
@@ -69,7 +73,7 @@ func loadConfig(iniFile string, inFile string, outFile string) (config, error) {
 	paEnablePin, paEnablePinErr := cfg.Section("Modem").Key("PAEnablePin").Int()
 	boot0Pin, boot0PinErr := cfg.Section("Modem").Key("Boot0Pin").Int()
 
-	_, callsignErr := m17.EncodeCallsign(callsign)
+    _, callsignErr := protocol.EncodeCallsign(callsign)
 	// TODO: Lots of these validations are CC1200 specific
 	if rxFrequencyErr == nil {
 		if rxFrequency < 420e6 || rxFrequency > 450e6 {
@@ -87,13 +91,13 @@ func loadConfig(iniFile string, inFile string, outFile string) (config, error) {
 		}
 	}
 
-	var reflectorHostfile, reflectorOverrideHostfile *m17.Hostfile
+    var reflectorHostfile, reflectorOverrideHostfile *hostfile.Hostfile
 	var reflectorHostfileErr, reflectorOverrideHostfileErr error
 	if hostFile != "" {
-		reflectorHostfile, reflectorHostfileErr = m17.NewHostfile(hostFile)
+        reflectorHostfile, reflectorHostfileErr = hostfile.NewHostfile(hostFile)
 	}
 	if overrideHostFile != "" {
-		reflectorOverrideHostfile, reflectorOverrideHostfileErr = m17.NewHostfile(overrideHostFile)
+        reflectorOverrideHostfile, reflectorOverrideHostfileErr = hostfile.NewHostfile(overrideHostFile)
 	}
 	var reflectorModuleErr error
 	if len(reflectorModule) > 1 {
@@ -211,31 +215,30 @@ func main() {
 	// 	fmt.Println(http.ListenAndServe(":6060", nil))
 	// }()
 
-	var g *Gateway
-	var modem m17.Modem
+    var g *Gateway
+    var modemDev modem.Modem
 	if cfg.modemPort != "" {
-		modem, err = m17.NewCC1200Modem(cfg.modemPort, cfg.nRSTPin, cfg.paEnablePin, cfg.boot0Pin, cfg.modemSpeed)
+        modemDev, err = modem.NewCC1200Modem(cfg.modemPort, cfg.nRSTPin, cfg.paEnablePin, cfg.boot0Pin, cfg.modemSpeed)
 		if err != nil {
 			log.Fatalf("Error connecting to modem: %v", err)
 		}
-		modem.SetRXFreq(cfg.rxFrequency)
-		modem.SetTXFreq(cfg.txFrequency)
-		modem.SetTXPower(cfg.power)
-		modem.SetFreqCorrection(cfg.frequencyCorr)
-		modem.SetAFC(cfg.afc)
+        modemDev.SetRXFreq(cfg.rxFrequency)
+        modemDev.SetTXFreq(cfg.txFrequency)
+        modemDev.SetTXPower(cfg.power)
+        modemDev.SetFreqCorrection(cfg.frequencyCorr)
+        modemDev.SetAFC(cfg.afc)
 		log.Printf("[INFO] Connected to modem on %s", cfg.modemPort)
 	} else {
-		m := m17.DummyModem{
-			In:  cfg.symbolsIn,
-			Out: cfg.symbolsOut,
-		}
-
-		modem = &m
+        m := modem.DummyModem{
+            In:  cfg.symbolsIn,
+            Out: cfg.symbolsOut,
+        }
+        modemDev = &m
 	}
 
 	if *reset {
 		log.Print("[INFO] Resetting modem")
-		err = modem.Reset()
+        err = modemDev.Reset()
 		if err != nil {
 			log.Printf("[ERROR] Error resetting modem: %v", err)
 			os.Exit(1)
@@ -243,8 +246,8 @@ func main() {
 		os.Exit(0)
 	}
 
-	log.Printf("[DEBUG] Creating gateway cfg: %#v, modem %#v", cfg, modem)
-	g, err = NewGateway(cfg, modem)
+        log.Printf("[DEBUG] Creating gateway cfg: %#v, modem %#v", cfg, modemDev)
+        g, err = NewGateway(cfg, modemDev)
 	if err != nil {
 		log.Fatalf("Error creating Gateway: %v", err)
 	}
@@ -282,18 +285,18 @@ type Gateway struct {
 	Port   uint
 	Module string
 
-	modem            m17.Modem
+    modem            modem.Modem
 	in               *os.File
 	out              *os.File
-	relay            *m17.Relay
+    relay            *relay.Relay
 	duplex           bool
 	done             bool
 	dashboardLogger  *slog.Logger
-	hostfile         *m17.Hostfile
-	overrideHostfile *m17.Hostfile
+    hostfile         *hostfile.Hostfile
+    overrideHostfile *hostfile.Hostfile
 }
 
-func NewGateway(cfg config, modem m17.Modem) (*Gateway, error) {
+func NewGateway(cfg config, modem modem.Modem) (*Gateway, error) {
 	var err error
 
 	g := Gateway{
@@ -315,7 +318,7 @@ func NewGateway(cfg config, modem m17.Modem) (*Gateway, error) {
 	g.Server = h.Server
 	g.Port = h.Port
 	log.Printf("[DEBUG] Connecting to %s, %s:%d, module %s", g.Name, g.Server, g.Port, g.Module)
-	g.relay, err = m17.NewRelay(g.Name, g.Server, g.Port, g.Module, cfg.callsign, cfg.dashboardLogger, g.TransmitPacket, g.TransmitVoiceStream)
+    g.relay, err = relay.NewRelay(g.Name, g.Server, g.Port, g.Module, cfg.callsign, cfg.dashboardLogger, g.TransmitPacket, g.TransmitVoiceStream)
 	if err != nil {
 		return nil, fmt.Errorf("error creating relay: %v", err)
 	}
@@ -329,36 +332,36 @@ func NewGateway(cfg config, modem m17.Modem) (*Gateway, error) {
 	return &g, nil
 }
 
-func (g Gateway) TransmitPacket(p m17.Packet) error {
+func (g Gateway) TransmitPacket(p protocol.Packet) error {
 	// log.Printf("[DEBUG] received packet from relay: %#v", p)
 	return g.modem.TransmitPacket(p)
 }
 
-func (g Gateway) TransmitVoiceStream(sd m17.StreamDatagram) error {
+func (g Gateway) TransmitVoiceStream(sd protocol.StreamDatagram) error {
 	// log.Printf("[DEBUG] received voice stream data from relay: %#v", sd)
 	return g.modem.TransmitVoiceStream(sd)
 }
 
-func (g *Gateway) SendToNetwork(lsf *m17.LSF, payload []byte, sid, fn uint16) error {
+func (g *Gateway) SendToNetwork(lsf *protocol.LSF, payload []byte, sid, fn uint16) error {
 	var err error
 	if lsf == nil {
 		return fmt.Errorf("nil lsf in SendToNetwork")
 	}
 	// log.Printf("[DEBUG] SendToNetwork lsf: %v, payload: % x, sid: %x, fn: %d", lsf, payload, sid, fn)
-	if lsf.LSFType() == m17.LSFTypePacket {
-		p := m17.NewPacketFromBytes(append(lsf.ToBytes(), payload...))
+    if lsf.LSFType() == protocol.LSFTypePacket {
+        p := protocol.NewPacketFromBytes(append(lsf.ToBytes(), payload...))
 		log.Printf("[DEBUG] send packet to reflector/relay: %v", p)
 		err = g.relay.SendPacket(p)
-	} else { // m17.LSFTypeStream
-		err = g.relay.SendStream(*lsf, sid, fn, payload)
-	}
+    } else { // protocol.LSFTypeStream
+        err = g.relay.SendStream(*lsf, sid, fn, payload)
+    }
 	// TODO: Handle error?
 	return err
 }
 
 func (g *Gateway) Run() {
 	signalChan := make(chan os.Signal, 1)
-	d := m17.NewDecoder(g.dashboardLogger)
+    d := phy.NewDecoder(g.dashboardLogger)
 	go d.DecodeSymbols(g.modem, g.SendToNetwork)
 	// Run until we're terminated then clean up
 	log.Print("[DEBUG] client: Waiting for close signal")

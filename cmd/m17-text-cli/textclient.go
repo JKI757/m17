@@ -3,14 +3,15 @@ package main
 // Inspired by https://github.com/jhudson8/golang-chat-example/
 
 import (
-	"bufio"
-	"flag"
-	"fmt"
-	"os"
-	"strings"
-	"time"
+    "bufio"
+    "flag"
+    "fmt"
+    "os"
+    "strings"
+    "time"
 
-	"github.com/jancona/m17"
+    protocol "github.com/jancona/m17/pkg/protocol"
+    relay "github.com/jancona/m17/pkg/relay"
 )
 
 var (
@@ -29,15 +30,15 @@ func main() {
 	}
 
 	var err error
-	*callsignArg = m17.NormalizeCallsignModule(*callsignArg)
-	_, err = m17.EncodeCallsign(*callsignArg)
+    *callsignArg = protocol.NormalizeCallsignModule(*callsignArg)
+    _, err = protocol.EncodeCallsign(*callsignArg)
 	if err != nil {
 		fmt.Printf("Bad callsign %s: %v", *callsignArg, err)
 		os.Exit(1)
 	}
 
 	// TODO: Add name argument and hostfile lookup
-	r, err := m17.NewRelay(*serverArg, *serverArg, *portArg, *moduleArg, *callsignArg, nil, handleM17, nil)
+    r, err := relay.NewRelay(*serverArg, *serverArg, *portArg, *moduleArg, *callsignArg, nil, handleM17, nil)
 	if err != nil {
 		fmt.Printf("Error creating client: %v", err)
 		os.Exit(1)
@@ -52,14 +53,14 @@ func main() {
 	handleConsoleInput(r)
 }
 
-func handleM17(p m17.Packet) error {
+func handleM17(p protocol.Packet) error {
 	// // A packet is an LSF + type code 0x05 for SMS + data up to 823 bytes
 	// log.Printf("[DEBUG] p: %#v", p)
-	dst, err := m17.DecodeCallsign(p.LSF.Dst[:])
+    dst, err := protocol.DecodeCallsign(p.LSF.Dst[:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Bad dst callsign: %v", err)
 	}
-	src, err := m17.DecodeCallsign(p.LSF.Src[:])
+    src, err := protocol.DecodeCallsign(p.LSF.Src[:])
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Bad src callsign: %v", err)
 	}
@@ -67,7 +68,7 @@ func handleM17(p m17.Packet) error {
 	if len(p.Payload) > 0 {
 		msg = string(p.Payload[0 : len(p.Payload)-1])
 	}
-	if p.Type == m17.PacketTypeSMS && (dst == *callsignArg || dst == m17.DestinationAll || dst[0:1] == "#") {
+    if p.Type == protocol.PacketTypeSMS && (dst == *callsignArg || dst == protocol.DestinationAll || dst[0:1] == "#") {
 		fmt.Printf("\n%s %s>%s: %s\n> ", time.Now().Format(time.DateTime), src, dst, msg)
 	}
 	return nil
@@ -75,7 +76,7 @@ func handleM17(p m17.Packet) error {
 
 // keep watching for console input
 // send the "message" command to the chat server when we have some
-func handleConsoleInput(c *m17.Relay) {
+func handleConsoleInput(c *relay.Relay) {
 	var done bool
 
 	reader := bufio.NewReader(os.Stdin)
@@ -101,7 +102,7 @@ func handleConsoleInput(c *m17.Relay) {
 				// Add a trailing NUL
 				msg := append([]byte(message), 0)
 				// log.Printf("[DEBUG] sending dst: %s, src: %s, msg: %s", callsign, *callsignArg, msg)
-				p, err := m17.NewPacket(callsign, *callsignArg, m17.PacketTypeSMS, msg)
+            p, err := protocol.NewPacket(callsign, *callsignArg, protocol.PacketTypeSMS, msg)
 				if err != nil {
 					fmt.Printf("Error creating Packet: %v\n", err)
 					continue
@@ -136,7 +137,7 @@ func parseInput(input string) (command, callsign, message string, ok bool) {
 		return
 	}
 	callsign, message, ok = strings.Cut(input, ": ")
-	callsign = m17.NormalizeCallsignModule(callsign)
+    callsign = protocol.NormalizeCallsignModule(callsign)
 	// log.Printf("[DEBUG] callsign: %s, message: %s", callsign, message)
 	return
 }

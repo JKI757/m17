@@ -1,4 +1,4 @@
-package m17
+package phy
 
 import (
 	"fmt"
@@ -82,7 +82,7 @@ func TestSampleToSymbol(t *testing.T) {
 		{"simple",
 			newparams{
 				make(chan int8),
-				rrcTaps5,
+                RRCTaps5,
 				RXSymbolScalingCoeff,
 			},
 			[]int8{

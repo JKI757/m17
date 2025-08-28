@@ -1,9 +1,10 @@
-package m17
+package protocol
 
 import (
-	"encoding/binary"
-	"fmt"
-	"log"
+    "encoding/binary"
+    "fmt"
+    "log"
+    fecpkg "github.com/jancona/m17/pkg/fec"
 )
 
 type LSFType byte
@@ -90,16 +91,16 @@ const (
 	srcPos  = dstPos + EncodedCallsignLen
 	typPos  = srcPos + EncodedCallsignLen
 	metaPos = typPos + typeLen
-	crcPos  = metaPos + metaLen
+    crcPos  = metaPos + metaLen
 )
 
 // Link Setup Frame
 type LSF struct {
-	Dst  EncodedCallsign
-	Src  EncodedCallsign
-	Type [typeLen]byte
-	Meta [metaLen]byte
-	CRC  [CRCLen]byte
+    Dst  EncodedCallsign
+    Src  EncodedCallsign
+    Type [typeLen]byte
+    Meta [metaLen]byte
+    CRC  [fecpkg.CRCLen]byte
 }
 
 func NewEmptyLSF() LSF {
@@ -134,7 +135,7 @@ func NewLSFFromBytes(buf []byte) LSF {
 	copy(lsf.Src[:], buf[srcPos:typPos])
 	copy(lsf.Type[:], buf[typPos:metaPos])
 	copy(lsf.Meta[:], buf[metaPos:crcPos])
-	copy(lsf.CRC[:], buf[crcPos:crcPos+CRCLen])
+    copy(lsf.CRC[:], buf[crcPos:crcPos+fecpkg.CRCLen])
 	return lsf
 }
 
@@ -175,17 +176,17 @@ func (l *LSF) ToBytes() []byte {
 
 // Calculate CRC for this LSF
 func (l *LSF) CalcCRC() uint16 {
-	a := l.ToBytes()
-	crc := CRC(a[:LSFLen-CRCLen])
-	crcb, _ := binary.Append(nil, binary.BigEndian, crc)
-	copy(l.CRC[:], crcb)
-	return crc
+    a := l.ToBytes()
+    crc := fecpkg.CRC(a[:LSFLen-fecpkg.CRCLen])
+    crcb, _ := binary.Append(nil, binary.BigEndian, crc)
+    copy(l.CRC[:], crcb)
+    return crc
 }
 
 // Check if the CRC is correct
 func (l *LSF) CheckCRC() bool {
-	a := l.ToBytes()
-	return CRC(a) == 0
+    a := l.ToBytes()
+    return fecpkg.CRC(a) == 0
 }
 
 func (l *LSF) LSFType() LSFType {

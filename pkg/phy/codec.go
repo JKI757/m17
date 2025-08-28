@@ -1,11 +1,14 @@
-package m17
+package phy
 
 import (
-	"encoding/binary"
-	"errors"
-	"fmt"
-	"math"
-	"slices"
+    "encoding/binary"
+    "errors"
+    "fmt"
+    "math"
+    "slices"
+    
+    fecpkg "github.com/jancona/m17/pkg/fec"
+    protocol "github.com/jancona/m17/pkg/protocol"
 )
 
 const (
@@ -33,7 +36,8 @@ const (
 )
 
 type Symbol float32
-type SoftBit uint16
+// Use the FEC package's SoftBit type to interoperate without conversions
+type SoftBit = fecpkg.SoftBit
 
 var (
 	// TX symbols
@@ -55,8 +59,8 @@ var (
 type Preamble byte
 
 const (
-	lsfPreamble Preamble = iota
-	bertPreamble
+    LSFPreamble Preamble = iota
+    BertPreamble
 )
 
 type Bit bool
@@ -157,7 +161,7 @@ func EuclNorm(s1, s2 []Symbol, n int) float64 {
 
 // AppendPreamble generates symbol stream for a preamble.
 func AppendPreamble(out []Symbol, typ Preamble) []Symbol {
-	if typ == bertPreamble {
+    if typ == BertPreamble {
 		for i := 0; i < SymbolsPerFrame/2; i++ {
 			out = append(out, -3.0, +3.0)
 		}
@@ -322,7 +326,7 @@ func ConvolutionalEncode(in []byte, puncturePattern PuncturePattern, finalBit by
 	return &out, nil
 }
 
-func ConvolutionalEncodeStream(lichBits []Bit, sd StreamDatagram) (*[]Bit, error) {
+func ConvolutionalEncodeStream(lichBits []Bit, sd protocol.StreamDatagram) (*[]Bit, error) {
 	frame, err := binary.Append(nil, binary.LittleEndian, sd.FrameNumber)
 	if err != nil {
 		return nil, fmt.Errorf("append frame number: %w", err)
