@@ -20,7 +20,7 @@ var EncodedDestinationAllBytes = [6]byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff}
 
 const m17Chars = " ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-/."
 
-var callsignRegex = regexp.MustCompile(`^[0-9]?[A-Z]{1,2}[0-9]{1,2}[A-Z]{1,4}([ -/\.][A-Z0-9 -/\.]*)?$`)
+var callsignRegex = regexp.MustCompile(`^([0-9]?[A-Z]{1,2}[0-9]{0,2}/)?[0-9]?[A-Z]{1,2}[0-9]{1,2}[A-Z]{1,4}([ -/\.][A-Z0-9 -/\.]*)?$`)
 var roomRegex = regexp.MustCompile(`^#[A-Z0-9 -/\.]+$`)
 
 func EncodeCallsign(callsign string) (*[6]byte, error) {
