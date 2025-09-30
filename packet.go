@@ -21,7 +21,7 @@ const (
 
 // M17 packet
 type Packet struct {
-	LSF     LSF
+	LSF     *LSF
 	Type    PacketType
 	Payload []byte
 	CRC     uint16
@@ -48,7 +48,7 @@ func NewPacket(dst, src string, t PacketType, data []byte) (*Packet, error) {
 	}
 	lsf.CalcCRC()
 	p := Packet{
-		LSF:  lsf,
+		LSF:  &lsf,
 		Type: t,
 	}
 	p.Payload = append(p.Payload, data...)

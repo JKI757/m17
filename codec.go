@@ -55,6 +55,7 @@ var (
 
 	// costTable0 = []Symbol{0, 0, 0, 0, 1, 1, 1, 1}
 	// costTable1 = []Symbol{0, 1, 1, 0, 0, 1, 1, 0}
+
 	costTable0 = []SoftBit{softFalse, softFalse, softFalse, softFalse, softTrue, softTrue, softTrue, softTrue}
 	costTable1 = []SoftBit{softFalse, softTrue, softTrue, softFalse, softFalse, softTrue, softTrue, softFalse}
 )
@@ -374,7 +375,7 @@ func (v *ViterbiDecoder) Init(l int) {
 	v.currMetricsData = make([]uint32, ConvolutionStates)
 }
 
-func (v *ViterbiDecoder) DecodePunctured(puncturedSoftBits []SoftBit, puncturePattern PuncturePattern) ([]byte, float64) {
+func (v *ViterbiDecoder) DecodePunctured(puncturedSoftBits []SoftBit, puncturePattern PuncturePattern) ([]byte, int) {
 	// log.Printf("[DEBUG] DecodePunctured len(puncturedSoftBits): %d, len(puncturePattern): %d", len(puncturedSoftBits), len(puncturePattern))
 	// log.Printf("[DEBUG] puncturedSoftBits: %#v, puncturePattern: %#v", puncturedSoftBits, puncturePattern)
 	// unpuncture input
@@ -395,16 +396,12 @@ func (v *ViterbiDecoder) DecodePunctured(puncturedSoftBits []SoftBit, puncturePa
 	}
 	softBits = softBits[:u+u%2]
 
-	out, de := v.decode(softBits)
-	// log.Printf("[DEBUG] out: %#v, vd: %#v", out, e-float64(u-len(puncturedSoftBits))*0.5)
-	// viterbi_decode(out, umsg, u) - (u-in_len)*0x7FFF;
-	e := de - uint32(u-len(puncturedSoftBits))*softMaybe
-	// e/0xFFFFU/SYM_PER_PLD/2.0f*100.0f)
-	mer := float64(e) / softTrue / SymbolsPerPayload / 2 * 100
-	return out, mer
+	out, e := v.decode(softBits)
+	// log.Printf("[DEBUG] DecodePunctured: e: %d", e)
+	return out, e
 }
 
-func (v *ViterbiDecoder) decode(softBits []SoftBit) ([]byte, uint32) {
+func (v *ViterbiDecoder) decode(softBits []SoftBit) ([]byte, int) {
 	// log.Printf("[DEBUG] decode() len(softBits): %d, softBits: %#v", len(softBits), softBits)
 	v.Init(len(softBits))
 	pos := 0
@@ -417,7 +414,7 @@ func (v *ViterbiDecoder) decode(softBits []SoftBit) ([]byte, uint32) {
 	}
 
 	out, e := v.chainback(pos, len(softBits)/2)
-	// log.Printf("[DEBUG] decode() return len(out): %d, out: %#v, e: %f", len(out), out, e)
+	// log.Printf("[DEBUG] decode() return len(out): %d, out: %#v, e: %d", len(out), out, e)
 	return out, e
 }
 
@@ -470,7 +467,7 @@ func absDiff(v1, v2 SoftBit) uint32 {
 	return uint32(v2 - v1)
 }
 
-func (v *ViterbiDecoder) chainback(pos, l int) ([]byte, uint32) {
+func (v *ViterbiDecoder) chainback(pos, l int) ([]byte, int) {
 	state := byte(0)
 	bitPos := l + 4
 	out := make([]byte, (l-1)/8+1)
@@ -488,8 +485,8 @@ func (v *ViterbiDecoder) chainback(pos, l int) ([]byte, uint32) {
 		}
 	}
 
-	cost := slices.Min(v.prevMetrics)
-	// log.Printf("[DEBUG] chainback(%d, %d) cost: %f", pos, l, cost)
+	cost := int(slices.Min(v.prevMetrics) / softMaybe / 2)
+	// log.Printf("[DEBUG] chainback(%d, %d) cost: %d", pos, l, cost)
 
 	return out, cost
 }

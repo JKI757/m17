@@ -1,7 +1,6 @@
 package m17
 
 import (
-	"math"
 	"reflect"
 	"testing"
 )
@@ -199,7 +198,7 @@ func TestViterbiDecoder_DecodePunctured(t *testing.T) {
 		fields fields
 		args   args
 		want   []byte
-		want1  float64
+		want1  int
 	}{
 		{"LSF",
 			fields{},
@@ -208,7 +207,7 @@ func TestViterbiDecoder_DecodePunctured(t *testing.T) {
 				puncturePattern:   LSFPuncturePattern,
 			},
 			[]byte{0x0, 0x0, 0x0, 0x7c, 0x6d, 0xf4, 0xb8, 0x0, 0x0, 0x1, 0x8a, 0x92, 0xae, 0x0, 0x5, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x6c, 0xba},
-			6.5,
+			2746924,
 		},
 		{"Stream",
 			fields{},
@@ -217,7 +216,7 @@ func TestViterbiDecoder_DecodePunctured(t *testing.T) {
 				puncturePattern:   StreamPuncturePattern,
 			},
 			[]byte{0x0, 0x0, 0x0, 0x4b, 0xc0, 0x8f, 0xc3, 0xd4, 0xfc, 0x25, 0x28, 0xc0, 0x5c, 0x6e, 0xc3, 0x9c, 0xe4, 0x21, 0x8},
-			6,
+			1114325,
 		},
 		{"Packet",
 			fields{},
@@ -226,7 +225,7 @@ func TestViterbiDecoder_DecodePunctured(t *testing.T) {
 				puncturePattern:   PacketPuncturePattern,
 			},
 			[]byte{0x0, 0x5, 0x61, 0x64, 0x67, 0x6a, 0x6d, 0x70, 0x74, 0x0, 0x29, 0xd0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0xac},
-			4.9,
+			1445723,
 		},
 	}
 	for _, tt := range tests {
@@ -242,7 +241,7 @@ func TestViterbiDecoder_DecodePunctured(t *testing.T) {
 			if !reflect.DeepEqual(got, tt.want) {
 				t.Errorf("ViterbiDecoder.DecodePunctured() got = %v, want %v", got, tt.want)
 			}
-			if math.Abs(float64(got1-tt.want1)) > 0.1 {
+			if got1 != tt.want1 {
 				t.Errorf("ViterbiDecoder.DecodePunctured() got1 = %v, want %v", got1, tt.want1)
 			}
 		})

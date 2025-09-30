@@ -106,6 +106,7 @@ const (
 type MMDVMModem struct {
 	frameSink func(typ uint16, softBits []SoftBit)
 
+	duplex     bool
 	m17Enabled bool
 	m17TXLevel float32
 	m17TXHang  byte
@@ -131,7 +132,8 @@ func NewMMDVMModem(
 	power float32,
 	frequencyCorr int16,
 	afc bool,
-	modemCfg *ini.Section) (*MMDVMModem, error) {
+	modemCfg *ini.Section,
+	duplex bool) (*MMDVMModem, error) {
 	var protocolErr, portErr error
 	protocol := modemCfg.Key("Protocol").In("BAD", []string{"uart"})
 	if protocol == "BAD" {
@@ -157,6 +159,7 @@ func NewMMDVMModem(
 	}
 
 	m := &MMDVMModem{
+		duplex:     duplex,
 		m17Enabled: true, // TODO: from config
 		m17TXLevel: 50,
 		m17TXHang:  5,
@@ -473,76 +476,76 @@ func (m *MMDVMModem) setProtocol1Config() error {
 
 	cmd[3] = 0x00
 	// if (m.rxInvert) {
-	// 	buffer[3] |= 0x01
+	// 	cmd[3] |= 0x01
 	// }
 	// if (m.txInvert) {
-	// 	buffer[3] |= 0x02
+	// 	cmd[3] |= 0x02
 	// }
 	// if (m.pttInvert) {
-	// 	buffer[3] |= 0x04
+	// 	cmd[3] |= 0x04
 	// }
 	// if (m.ysfLoDev) {
-	// 	buffer[3] |= 0x08
+	// 	cmd[3] |= 0x08
 	// }
 	// if (m.debug) {
-	// 	buffer[3] |= 0x10
+	// 	cmd[3] |= 0x10
 	// }
 	// if (m.useCOSAsLockout) {
-	// 	buffer[3] |= 0x20
+	// 	cmd[3] |= 0x20
 	// }
-	// if (!m.duplex) {
-	// 	buffer[3] |= 0x80
-	// }
+	if !m.duplex {
+		cmd[3] |= 0x80
+	}
 	cmd[4] = 0x00
 	// if (m.dstarEnabled)
-	// 	buffer[4] |= 0x01
+	// 	cmd[4] |= 0x01
 	// if (m.dmrEnabled)
-	// 	buffer[4] |= 0x02
+	// 	cmd[4] |= 0x02
 	// if (m.ysfEnabled)
-	// 	buffer[4] |= 0x04
+	// 	cmd[4] |= 0x04
 	// if (m.p25Enabled)
-	// 	buffer[4] |= 0x08
+	// 	cmd[4] |= 0x08
 	// if (m.nxdnEnabled)
-	// 	buffer[4] |= 0x10
+	// 	cmd[4] |= 0x10
 	// if (m.pocsagEnabled)
-	// 	buffer[4] |= 0x20
+	// 	cmd[4] |= 0x20
 	if m.m17Enabled {
 		cmd[4] |= 0x40
 	}
 
-	// buffer[5] = m.txDelay / 10 // In 10ms units
+	// cmd[5] = m.txDelay / 10 // In 10ms units
 
 	cmd[6] = mmdvmModeIdle
 
-	// buffer[7] = byte(m.rxLevel*2.55 + 0.5)
+	// cmd[7] = byte(m.rxLevel*2.55 + 0.5)
 
-	// buffer[8] = byte(m.cwIdTXLevel*2.55 + 0.5)
+	// cmd[8] = byte(m.cwIdTXLevel*2.55 + 0.5)
 
-	// buffer[9] = m.dmrColorCode
+	// cmd[9] = m.dmrColorCode
 
-	// buffer[10] = m.dmrDelay
+	// cmd[10] = m.dmrDelay
 
 	cmd[11] = 128 // Was OscOffset
 
-	// buffer[12] = byte(m.dstarTXLevel*2.55 + 0.5)
-	// buffer[13] = byte(m.dmrTXLevel*2.55 + 0.5)
-	// buffer[14] = byte(m.ysfTXLevel*2.55 + 0.5)
-	// buffer[15] = byte(m.p25TXLevel*2.55 + 0.5)
+	// cmd[12] = byte(m.dstarTXLevel*2.55 + 0.5)
+	// cmd[13] = byte(m.dmrTXLevel*2.55 + 0.5)
+	// cmd[14] = byte(m.ysfTXLevel*2.55 + 0.5)
+	// cmd[15] = byte(m.p25TXLevel*2.55 + 0.5)
 
-	// buffer[16] = byte(m.txDCOffset + 128)
-	// buffer[17] = byte(m.rxDCOffset + 128)
+	// cmd[16] = byte(m.txDCOffset + 128)
+	// cmd[17] = byte(m.rxDCOffset + 128)
 
-	// buffer[18] = byte(m.nxdnTXLevel*2.55 + 0.5)
+	// cmd[18] = byte(m.nxdnTXLevel*2.55 + 0.5)
 
-	// buffer[19] = byte(m.ysfTXHang)
+	// cmd[19] = byte(m.ysfTXHang)
 
-	// buffer[20] = byte(m.pocsagTXLevel*2.55 + 0.5)
+	// cmd[20] = byte(m.pocsagTXLevel*2.55 + 0.5)
 
-	// buffer[21] = byte(m.fmTXLevel*2.55 + 0.5)
+	// cmd[21] = byte(m.fmTXLevel*2.55 + 0.5)
 
-	// buffer[22] = byte(m.p25TXHang)
+	// cmd[22] = byte(m.p25TXHang)
 
-	// buffer[23] = byte(m.nxdnTXHang)
+	// cmd[23] = byte(m.nxdnTXHang)
 
 	cmd[24] = byte(m.m17TXLevel*2.55 + 0.5)
 
@@ -834,13 +837,10 @@ func (m *MMDVMModem) TransmitPacket(p Packet) error {
 	var bits []Bit
 	var err error
 
-	bits, err = generateLSFBits(p.LSF)
+	log.Printf("[DEBUG] TransmitPacket send LSF")
+	err = m.transmitLSF(*p.LSF)
 	if err != nil {
-		return fmt.Errorf("failed to generate LSF bitd: %w", err)
-	}
-	err = m.writeBits(mmdvmM17LinkSetup, bits)
-	if err != nil {
-		return fmt.Errorf("failed to send LSF: %w", err)
+		return fmt.Errorf("failed to send packet LSF: %w", err)
 	}
 
 	chunkCnt := 0
@@ -886,25 +886,36 @@ func (m *MMDVMModem) TransmitPacket(p Packet) error {
 	return nil
 }
 
+func (m *MMDVMModem) transmitLSF(lsf LSF) error {
+	log.Printf("[DEBUG] transmitLSF: %s", lsf)
+	bits, err := generateLSFBits(lsf)
+	if err != nil {
+		return fmt.Errorf("failed to generate LSF bits: %w", err)
+	}
+	err = m.writeBits(mmdvmM17LinkSetup, bits)
+	if err != nil {
+		return fmt.Errorf("failed to send LSF: %w", err)
+	}
+	return nil
+}
+
 func (m *MMDVMModem) TransmitVoiceStream(sd StreamDatagram) error {
 	log.Printf("[DEBUG] TransmitVoiceStream id: %04x, fn: %04x, last: %v", sd.StreamID, sd.FrameNumber, sd.LastFrame)
 	var bits []Bit
 	var err error
 
-	if sd.FrameNumber == 0 { // first frame
-		bits, err = generateLSFBits(sd.LSF)
+	if sd.FrameNumber == 0 && sd.LSF != nil { // first frame
+		log.Printf("[DEBUG] TransmitVoiceStream send LSF")
+		err = m.transmitLSF(*sd.LSF)
 		if err != nil {
-			return fmt.Errorf("failed to generate LSF bitd: %w", err)
-		}
-		err = m.writeBits(mmdvmM17LinkSetup, bits)
-		if err != nil {
-			return fmt.Errorf("failed to send LSF: %w", err)
+			return fmt.Errorf("failed to send stream LSF: %w", err)
 		}
 	}
 	bits, err = generateStreamBits(sd)
 	if err != nil {
 		return fmt.Errorf("failed to generate stream bits: %w", err)
 	}
+	log.Printf("[DEBUG] TransmitVoiceStream sending bits")
 	err = m.writeBits(mmdvmM17Stream, bits)
 	if err != nil {
 		return fmt.Errorf("failed to send stream frame: %w", err)

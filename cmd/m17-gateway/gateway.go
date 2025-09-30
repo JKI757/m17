@@ -231,7 +231,7 @@ func main() {
 		}
 		log.Printf("[INFO] Connected to CC1200 modem on %s", cfg.modemCfg.Key("Port").String())
 	case "mmdvm":
-		modem, err = m17.NewMMDVMModem(cfg.rxFrequency, cfg.txFrequency, cfg.power, cfg.frequencyCorr, cfg.afc, cfg.modemCfg)
+		modem, err = m17.NewMMDVMModem(cfg.rxFrequency, cfg.txFrequency, cfg.power, cfg.frequencyCorr, cfg.afc, cfg.modemCfg, cfg.duplex)
 		if err != nil {
 			log.Fatalf("Error creating MMDVM modem: %v", err)
 		}
@@ -280,7 +280,8 @@ func setupLogging(c config) {
 		Writer:   logWriter,
 	}
 	log.SetOutput(filter)
-	// log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	// log.SetFlags(0)
 	log.Print("[DEBUG] Debug is on")
 }
 
@@ -359,8 +360,19 @@ func (g *Gateway) SendToNetwork(lsf *m17.LSF, payload []byte, sid, fn uint16) er
 		p := m17.NewPacketFromBytes(append(lsf.ToBytes(), payload...))
 		log.Printf("[DEBUG] send packet to reflector/relay: %v", p)
 		err = g.relay.SendPacket(p)
+		if g.duplex {
+			g.modem.TransmitPacket(p)
+		}
 	} else { // m17.LSFTypeStream
-		err = g.relay.SendStream(*lsf, sid, fn, payload)
+		if payload != nil {
+			// if payload is nil, this is an LSF frame, so there's nothing to send to the reflector
+			err = g.relay.SendStream(lsf, sid, fn, payload)
+		}
+		if g.duplex {
+			sd := m17.NewStreamDatagram(sid, fn, lsf, payload)
+			err2 := g.modem.TransmitVoiceStream(sd)
+			err = errors.Join(err, err2)
+		}
 	}
 	// TODO: Handle error?
 	return err
@@ -368,7 +380,7 @@ func (g *Gateway) SendToNetwork(lsf *m17.LSF, payload []byte, sid, fn uint16) er
 
 func (g *Gateway) Run() {
 	signalChan := make(chan os.Signal, 1)
-	d := m17.NewDecoder(g.dashboardLogger, g.SendToNetwork)
+	d := m17.NewDecoder(g.dashboardLogger, g.SendToNetwork, g.duplex)
 	g.modem.StartDecoding(d.DecodeFrame)
 	// Run until we're terminated then clean up
 	log.Print("[DEBUG] client: Waiting for close signal")

@@ -68,7 +68,7 @@ func generateLSFBits(l LSF) ([]Bit, error) {
 	return bits, nil
 }
 
-func generateLSFSymbols(l LSF) ([]Symbol, error) {
+func generateLSFSymbols(l *LSF) ([]Symbol, error) {
 	// bits, err := generateLSFBits(l)
 	// if err != nil {
 	// 	return nil, fmt.Errorf("unable to encode LSF: %w", err)
@@ -124,7 +124,7 @@ func generateStreamSymbols(sd StreamDatagram) ([]Symbol, error) {
 	return syms, nil
 }
 
-func extractLICH(lichCnt int, lsf LSF) []byte {
+func extractLICH(lichCnt int, lsf *LSF) []byte {
 	lich := lsf.ToBytes()[lichCnt*5 : lichCnt*5+5]
 	return append(lich, byte(lichCnt)<<5)
 }
