@@ -252,11 +252,13 @@ func (m *CC1200Modem) processSymbols() {
 func (m *CC1200Modem) rxPipeline(sampleSource chan int8) (chan float32, error) {
 	// modem samples -> DC filter --> RRC filter & scale
 	var err error
-	dcf, err := NewDCFilter(sampleSource, len(rrcTaps5))
+	dcf, err := NewDCFilter(sampleSource, 200) //len(rrcTaps5))
 	if err != nil {
 		return nil, fmt.Errorf("dc filter: %w", err)
 	}
-	s2s := NewSampleToSymbol(dcf.Source(), rrcTaps5, RXSymbolScalingCoeff)
+	// The 1.15 factor was empirically determined. A 15 second transmission from my CS7000
+	// had a BER of 3.3%, compared to 4.9% with the factor at 1.0
+	s2s := NewSampleToSymbol(dcf.Source(), rrcTaps5, RXSymbolScalingCoeff*1.15)
 	// ds, err := NewDownsampler(s2s.Source(), 5, 0)
 	// if err != nil {
 	// 	return nil, fmt.Errorf("downsampler: %w", err)

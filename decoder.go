@@ -49,6 +49,8 @@ type Decoder struct {
 	lsfBytes     []byte
 	dashLog      *slog.Logger
 	lastLogTime  time.Time
+	errors       int
+	bits         int
 }
 
 // 8 preamble symbols, 8 for the syncword, and 960 for the payload.
@@ -79,6 +81,8 @@ func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
 			d.timeoutCnt = 0
 			d.lastStreamFN = 0xffff
 			d.lastPacketFN = 0xff
+			d.errors = e
+			d.bits = 368
 
 			if d.lsf.Type[1]&byte(LSFTypeStream) == byte(LSFTypeStream) {
 				d.syncedType = StreamSync
@@ -129,6 +133,8 @@ func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
 
 	case typ == PacketSync && d.syncedType == PacketSync:
 		pktFrame, e := d.decodePacketFrame(softBits)
+		d.errors += e
+		d.bits += 368
 		// log.Printf("[DEBUG] pktFrame: % x", pktFrame)
 		lastFrame := (pktFrame[25] >> 7) != 0
 
@@ -164,9 +170,9 @@ func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
 				if d.dashLog != nil {
 					if p.Type == PacketTypeSMS && len(p.Payload) > 0 {
 						msg := string(p.Payload[0 : len(p.Payload)-1])
-						d.dashLog.Info("", "type", "RF", "subtype", "Packet", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", json.Number(fmt.Sprintf("%f", float64(e)/3.68)), "packetType", p.Type, "smsMessage", msg)
+						d.dashLog.Info("", "type", "RF", "subtype", "Packet", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", json.Number(fmt.Sprintf("%f", float64(d.errors)/float64(d.bits)*100)), "packetType", p.Type, "smsMessage", msg)
 					} else {
-						d.dashLog.Info("", "type", "RF", "subtype", "Packet", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", json.Number(fmt.Sprintf("%f", float64(e)/3.68)), "packetType", p.Type)
+						d.dashLog.Info("", "type", "RF", "subtype", "Packet", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", json.Number(fmt.Sprintf("%f", float64(d.errors)/float64(d.bits)*100)), "packetType", p.Type)
 					}
 				}
 			} else {
@@ -183,6 +189,8 @@ func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
 		var fn uint16
 		d.frameData, lich, fn, lichCnt, e = d.decodeStreamFrame(softBits)
 		log.Printf("[DEBUG] frameData: [% 2x], lich: %02x, lichCnt: %d, d.lichParts: %04x, fn: %04x, d.lastStreamFN: %04x, e: %d", d.frameData, lich, lichCnt, d.lichParts, fn, d.lastStreamFN, e)
+		d.errors += e
+		d.bits += 272
 		if d.lastStreamFN+1 == fn&0x7fff {
 			if d.lichParts != 0x3F && lichCnt < 6 { //6 chunks = 0b111111
 				//reconstruct LSF chunk by chunk
@@ -243,7 +251,7 @@ func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
 				d.timeoutCnt = 0
 				if d.dashLog != nil && lastFrame {
 					log.Printf("[DEBUG] Last frame for RF voice stream %04x", d.streamID)
-					d.dashLog.Info("", "type", "RF", "subtype", "Voice End", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", json.Number(fmt.Sprintf("%f", float64(e)/2.72)))
+					d.dashLog.Info("", "type", "RF", "subtype", "Voice End", "src", d.lsf.Src.Callsign(), "dst", d.lsf.Dst.Callsign(), "can", d.lsf.CAN(), "mer", json.Number(fmt.Sprintf("%f", float64(d.errors)/float64(d.bits)*100)))
 				}
 			}
 			if lastFrame {
@@ -413,4 +421,6 @@ func (d *Decoder) reset() {
 	d.lastPacketFN = 0xff
 	d.lastStreamFN = 0xffff
 	d.lichParts = 0
+	d.errors = 0
+	d.bits = 0
 }

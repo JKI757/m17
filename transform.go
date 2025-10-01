@@ -15,11 +15,14 @@ const (
 	//40.0e3 is F_TCXO in kHz
 	//129 is `CFM_RX_DATA_OUT` register value at max. F_DEV
 	//datasheet might have this wrong (it says 64)
+
 	RXSymbolScalingCoeff = (1.0 / (0.8 / (40.0e3 / 2097152 * 0xAD) * 129.0))
+
 	//0xAD is `DEVIATION_M`, 2097152=2^21
 	//+0.8kHz is the deviation for symbol +1
 	//40.0e3 is F_TCXO in kHz
 	//64 is `CFM_TX_DATA_IN` register value for max. F_DEV
+
 	TXSymbolScalingCoeff = (0.8 / ((40.0e3 / 2097152) * 0xAD) * 64.0)
 )
 
@@ -196,24 +199,25 @@ func (t *Transform[I, O]) handle() {
 // Filter DC from int8 samples by subtracting a moving average
 type DCFilter struct {
 	Transform[int8, int8]
-	averageN  int
-	movingAvg int8
+	averageCnt int
+	movingAvg  int
 }
 
-func NewDCFilter(sink chan int8, averageN int) (DCFilter, error) {
+func NewDCFilter(sink chan int8, averageCnt int) (DCFilter, error) {
 	ret := DCFilter{
-		averageN: averageN,
+		averageCnt: averageCnt,
 	}
-	if averageN < 1 {
-		return ret, fmt.Errorf("averageN must be greater than zero")
+	if averageCnt < 1 {
+		return ret, fmt.Errorf("averageCnt must be greater than zero")
 	}
 	ret.Transform = NewTransform(sink, ret.dcFilter, 0)
 	return ret, nil
 }
 func (t *DCFilter) dcFilter(sample int8) []int8 {
-	t.movingAvg = int8((int(t.movingAvg)*(t.averageN-1) + int(sample)) / t.averageN)
-	// log.Printf("[DEBUG] movingAvg: %d, sample: %d, ret: %d", t.movingAvg, sample, sample-t.movingAvg)
-	return []int8{sample - t.movingAvg}
+	ret := sample - int8(t.movingAvg)
+	t.movingAvg = (t.movingAvg*(t.averageCnt-1) + int(sample)) / t.averageCnt
+	// log.Printf("[DEBUG] movingAvg: %d, sample: %d, ret: %d", t.movingAvg, sample, sample-int8(t.movingAvg))
+	return []int8{ret}
 }
 
 // scale samples by a factor
