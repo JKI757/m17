@@ -143,28 +143,33 @@ func (m *CC1200Modem) processReceivedData(rxSource chan int8) {
 		// log.Printf("[DEBUG] processReceivedData Read()")
 		n, err := m.modem.Read(buf)
 		if n > 0 {
-			// log.Printf("[DEBUG] processReceivedData read %x, trxState: %d", buf[0], m.trxState.Load())
-			m.mutex.Lock()
-			if m.isCommandWithResponse {
-				m.mutex.Unlock()
-				// log.Printf("[DEBUG] processReceivedData cmdSource <- : %x", buf[0])
-				m.cmdSource <- buf[0]
-			} else {
-				m.mutex.Unlock()
-				select {
-				case rxSource <- int8(buf[0]):
-					// sent
-					// log.Printf("[DEBUG] processReceivedData rxSource <- : %x", buf[0])
-				default:
-					// pipeline is full, so drop it
-					log.Printf("[DEBUG] processReceivedData dropped rx: %x", buf[0])
-				}
-			}
+			m.routeIncomingByte(buf[0], rxSource)
 		}
 		if err != nil {
+			if errors.Is(err, io.EOF) {
+				log.Printf("[WARN] modem read EOF, retrying")
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
 			log.Printf("[ERROR] Error reading from modem: %v", err)
-			break
+			time.Sleep(500 * time.Millisecond)
 		}
+	}
+}
+
+func (m *CC1200Modem) routeIncomingByte(b byte, rxSource chan int8) {
+	m.mutex.Lock()
+	if m.isCommandWithResponse {
+		m.mutex.Unlock()
+		m.cmdSource <- b
+		return
+	}
+	m.mutex.Unlock()
+	select {
+	case rxSource <- int8(b):
+		// delivered to pipeline
+	default:
+		log.Printf("[DEBUG] processReceivedData dropped rx: %x", b)
 	}
 }
 func (m *CC1200Modem) rxPipeline(sampleSource chan int8) (chan float32, error) {
@@ -491,6 +496,7 @@ func (m *CC1200Modem) startTX() error {
 	m.txState = txTX
 	m.mutex.Unlock()
 	m.txTimer.Reset(txTimeout)
+	log.Printf("[DEBUG] end startTX()")
 	return nil
 }
 
@@ -691,6 +697,12 @@ func (m *CC1200Modem) commandWithResponse(cmd []byte) ([]byte, error) {
 	m.mutex.Lock()
 	m.isCommandWithResponse = true
 	m.mutex.Unlock()
+	defer func() {
+		m.mutex.Lock()
+		m.isCommandWithResponse = false
+		m.mutex.Unlock()
+		m.clearResponseBuf()
+	}()
 	err := m.command(cmd)
 	if err != nil {
 		return nil, err
@@ -699,9 +711,6 @@ func (m *CC1200Modem) commandWithResponse(cmd []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("commandWithResponse(): %w", err)
 	}
-	m.mutex.Lock()
-	m.isCommandWithResponse = false
-	m.mutex.Unlock()
 	log.Printf("[DEBUG] commandWithResponse() received: % 2x", resp)
 	return resp, nil
 }
