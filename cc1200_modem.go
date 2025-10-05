@@ -48,6 +48,8 @@ const (
 // txTimeout must be greater than this!
 const txVoiceStreamWait = 10 * 40 * time.Millisecond
 const txTimeout = txVoiceStreamWait + 80*time.Millisecond
+const rxWatchdogInterval = time.Second
+const rxWatchdogTick = 250 * time.Millisecond
 
 type Line interface {
 	SetValue(value int) error
@@ -70,6 +72,9 @@ type CC1200Modem struct {
 	boot0                 Line
 	debugLog              *os.File
 	lastTXData            time.Time
+	lastRXData            time.Time
+	rxWatchdogStop        chan struct{}
+	rxWatchdogOnce        sync.Once
 }
 
 func NewCC1200Modem(
@@ -82,6 +87,7 @@ func NewCC1200Modem(
 		rxSymbols: make(chan float32),
 		s2s:       NewSymbolToSample(rrcTaps5, TXSymbolScalingCoeff*transmitGain, false, 5),
 		cmdSource: make(chan byte),
+		rxWatchdogStop: make(chan struct{}),
 	}
 	ret.txTimer = time.AfterFunc(txTimeout, func() {
 		log.Printf("[DEBUG] TX timeout")
@@ -89,6 +95,7 @@ func NewCC1200Modem(
 		ret.Start()
 	})
 	ret.lastTXData = time.Now()
+	ret.lastRXData = time.Now()
 	// Stop it until we transmit
 	ret.txTimer.Stop()
 	ret.txState = txIdle
@@ -124,6 +131,7 @@ func NewCC1200Modem(
 		return nil, fmt.Errorf("rx pipeline setup: %w", err)
 	}
 	go ret.processReceivedData(rxSource)
+	go ret.rxWatchdog()
 	_, err = ret.commandWithResponse([]byte{cmdPing, 2})
 	if err != nil {
 		return nil, fmt.Errorf("test PING: %w", err)
@@ -159,6 +167,7 @@ func (m *CC1200Modem) processReceivedData(rxSource chan int8) {
 
 func (m *CC1200Modem) routeIncomingByte(b byte, rxSource chan int8) {
 	m.mutex.Lock()
+	m.lastRXData = time.Now()
 	if m.isCommandWithResponse {
 		m.mutex.Unlock()
 		m.cmdSource <- b
@@ -171,6 +180,35 @@ func (m *CC1200Modem) routeIncomingByte(b byte, rxSource chan int8) {
 	default:
 		log.Printf("[DEBUG] processReceivedData dropped rx: %x", b)
 	}
+}
+
+func (m *CC1200Modem) rxWatchdog() {
+	ticker := time.NewTicker(rxWatchdogTick)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			m.mutex.Lock()
+			idle := m.txState == txIdle
+			last := m.lastRXData
+			m.mutex.Unlock()
+			if idle && time.Since(last) > rxWatchdogInterval {
+				idleDuration := time.Since(last)
+				log.Printf("[WARN] RX watchdog: no samples for %v, restarting RX", idleDuration)
+				if err := m.Start(); err != nil {
+					log.Printf("[ERROR] RX watchdog failed to restart RX: %v", err)
+				}
+			}
+		case <-m.rxWatchdogStop:
+			return
+		}
+	}
+}
+
+func (m *CC1200Modem) stopRXWatchdog() {
+	m.rxWatchdogOnce.Do(func() {
+		close(m.rxWatchdogStop)
+	})
 }
 func (m *CC1200Modem) rxPipeline(sampleSource chan int8) (chan float32, error) {
 	// modem samples -> DC filter --> RRC filter & scale
@@ -243,6 +281,7 @@ func (m *CC1200Modem) Close() error {
 	log.Print("[DEBUG] modem Close()")
 	m.stopRX()
 	m.stopTX()
+	m.stopRXWatchdog()
 	m.nRST.Close()
 	m.paEnable.Close()
 	m.boot0.Close()
@@ -496,7 +535,7 @@ func (m *CC1200Modem) startTX() error {
 	m.txState = txTX
 	m.mutex.Unlock()
 	m.txTimer.Reset(txTimeout)
-	log.Printf("[DEBUG] end startTX()")
+	// log.Printf("[DEBUG] end startTX()")
 	return nil
 }
 
@@ -553,6 +592,7 @@ func (m *CC1200Modem) Start() error {
 	// m.stopRX()
 	m.mutex.Lock()
 	m.txState = txIdle
+	m.lastRXData = time.Now()
 	m.mutex.Unlock()
 	m.clearResponseBuf()
 	var err error
