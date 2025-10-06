@@ -57,7 +57,9 @@ type Line interface {
 }
 
 type CC1200Modem struct {
-	modem     io.ReadWriteCloser
+	cmdPort   io.ReadWriteCloser
+	bbPort    io.ReadWriteCloser
+	dualPort  bool
 	rxSymbols chan float32
 	// txSymbols chan float32
 	s2s SymbolToSample
@@ -78,17 +80,23 @@ type CC1200Modem struct {
 }
 
 func NewCC1200Modem(
-	port string,
+	commandPort string,
+	basebandPort string,
 	nRSTPin int,
 	paEnablePin int,
 	boot0Pin int,
 	baudRate int) (*CC1200Modem, error) {
+	if commandPort == "" {
+		return nil, fmt.Errorf("command port must be specified")
+	}
+
 	ret := &CC1200Modem{
-		rxSymbols: make(chan float32),
-		s2s:       NewSymbolToSample(rrcTaps5, TXSymbolScalingCoeff*transmitGain, false, 5),
-		cmdSource: make(chan byte),
+		rxSymbols:      make(chan float32),
+		s2s:            NewSymbolToSample(rrcTaps5, TXSymbolScalingCoeff*transmitGain, false, 5),
+		cmdSource:      make(chan byte),
 		rxWatchdogStop: make(chan struct{}),
 	}
+	ret.dualPort = basebandPort != "" && basebandPort != commandPort
 	ret.txTimer = time.AfterFunc(txTimeout, func() {
 		log.Printf("[DEBUG] TX timeout")
 		ret.stopTX()
@@ -99,57 +107,98 @@ func NewCC1200Modem(
 	// Stop it until we transmit
 	ret.txTimer.Stop()
 	ret.txState = txIdle
-	var err error
-	fi, err := os.Stat(port)
-	if err != nil {
-		return nil, fmt.Errorf("modem stat: %w", err)
-	}
-	if fi.Mode()&os.ModeSocket == os.ModeSocket {
-		log.Printf("[DEBUG] Opening emulator")
-		ret.modem, err = net.Dial("unix", port)
+
+	openSerial := func(path string) (serial.Port, error) {
+		mode := &serial.Mode{BaudRate: baudRate}
+		port, err := serial.Open(path, mode)
 		if err != nil {
-			return nil, fmt.Errorf("modem socket open: %w", err)
+			return nil, err
+		}
+		if setter, ok := port.(interface{ SetDTR(bool) error }); ok {
+			if err := setter.SetDTR(true); err != nil {
+				log.Printf("[WARN] failed to assert DTR on %s: %v", path, err)
+			}
+		}
+		return port, nil
+	}
+
+	cmdInfo, err := os.Stat(commandPort)
+	if err != nil {
+		return nil, fmt.Errorf("modem stat (%s): %w", commandPort, err)
+	}
+	if cmdInfo.Mode()&os.ModeSocket == os.ModeSocket {
+		log.Printf("[DEBUG] Opening command emulator on %s", commandPort)
+		ret.cmdPort, err = net.Dial("unix", commandPort)
+		if err != nil {
+			return nil, fmt.Errorf("modem socket open (%s): %w", commandPort, err)
 		}
 		// This is the emulator so don't initialize GPIO
 	} else {
-		log.Printf("[DEBUG] Opening modem")
+		log.Printf("[DEBUG] Opening command port %s", commandPort)
 		err = ret.gpioSetup(nRSTPin, paEnablePin, boot0Pin)
 		if err != nil {
 			return nil, err
 		}
-		mode := &serial.Mode{
-			BaudRate: baudRate,
-		}
-		ret.modem, err = serial.Open(port, mode)
+		var port serial.Port
+		port, err = openSerial(commandPort)
 		if err != nil {
-			return nil, fmt.Errorf("modem open: %w", err)
+			return nil, fmt.Errorf("modem open (%s): %w", commandPort, err)
 		}
+		ret.cmdPort = port
 	}
+
+	if ret.dualPort {
+		bbInfo, err := os.Stat(basebandPort)
+		if err != nil {
+			ret.closePorts()
+			return nil, fmt.Errorf("baseband stat (%s): %w", basebandPort, err)
+		}
+		if bbInfo.Mode()&os.ModeSocket == os.ModeSocket {
+			log.Printf("[DEBUG] Opening baseband emulator on %s", basebandPort)
+			ret.bbPort, err = net.Dial("unix", basebandPort)
+			if err != nil {
+				ret.closePorts()
+				return nil, fmt.Errorf("baseband socket open (%s): %w", basebandPort, err)
+			}
+		} else {
+			log.Printf("[DEBUG] Opening baseband port %s", basebandPort)
+			var port serial.Port
+			port, err = openSerial(basebandPort)
+			if err != nil {
+				ret.closePorts()
+				return nil, fmt.Errorf("baseband open (%s): %w", basebandPort, err)
+			}
+			ret.bbPort = port
+		}
+	} else {
+		ret.bbPort = ret.cmdPort
+	}
+
 	rxSource := make(chan int8, samplesPerSecond)
 	ret.rxSymbols, err = ret.rxPipeline(rxSource)
 	if err != nil {
+		ret.closePorts()
 		return nil, fmt.Errorf("rx pipeline setup: %w", err)
 	}
-	go ret.processReceivedData(rxSource)
+	if ret.dualPort {
+		go ret.processCommandStream(ret.cmdPort)
+		go ret.processBasebandStream(ret.bbPort, rxSource)
+	} else {
+		go ret.processCombinedStream(ret.cmdPort, rxSource)
+	}
 	go ret.rxWatchdog()
 	_, err = ret.commandWithResponse([]byte{cmdPing, 2})
 	if err != nil {
+		ret.Close()
 		return nil, fmt.Errorf("test PING: %w", err)
 	}
-	// ret.debugLog, err = os.OpenFile("/home/jim/debug.sym", os.O_CREATE|os.O_WRONLY, 0644)
-	// if err != nil {
-	// 	log.Printf("[DEBUG] Failure opening debug log: %v", err)
-	// } else {
-	// 	log.Printf("[DEBUG] Opened debug log: %v", ret.debugLog)
-	// }
 	return ret, nil
 }
 
-func (m *CC1200Modem) processReceivedData(rxSource chan int8) {
+func (m *CC1200Modem) processCombinedStream(reader io.Reader, rxSource chan int8) {
 	buf := make([]byte, 1)
 	for {
-		// log.Printf("[DEBUG] processReceivedData Read()")
-		n, err := m.modem.Read(buf)
+		n, err := reader.Read(buf)
 		if n > 0 {
 			m.routeIncomingByte(buf[0], rxSource)
 		}
@@ -165,6 +214,67 @@ func (m *CC1200Modem) processReceivedData(rxSource chan int8) {
 	}
 }
 
+func (m *CC1200Modem) processCommandStream(reader io.Reader) {
+	buf := make([]byte, 1)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			m.routeIncomingByte(buf[0], nil)
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				log.Printf("[WARN] command port read EOF, retrying")
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			log.Printf("[ERROR] Error reading from command port: %v", err)
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+}
+
+func (m *CC1200Modem) processBasebandStream(reader io.Reader, rxSource chan int8) {
+	buf := make([]byte, 256)
+	for {
+		n, err := reader.Read(buf)
+		if n > 0 {
+			m.mutex.Lock()
+			m.lastRXData = time.Now()
+			m.mutex.Unlock()
+			for i := 0; i < n; i++ {
+				b := int8(buf[i])
+				select {
+				case rxSource <- b:
+				default:
+					log.Printf("[DEBUG] processBasebandStream dropped rx: %x", b)
+				}
+			}
+		}
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				log.Printf("[WARN] baseband port read EOF, retrying")
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+			log.Printf("[ERROR] Error reading from baseband port: %v", err)
+			time.Sleep(500 * time.Millisecond)
+		}
+	}
+}
+
+func (m *CC1200Modem) closePorts() error {
+	var err error
+	if m.bbPort != nil && m.bbPort != m.cmdPort {
+		err = errors.Join(err, m.bbPort.Close())
+		m.bbPort = nil
+	}
+	if m.cmdPort != nil {
+		err = errors.Join(err, m.cmdPort.Close())
+		m.cmdPort = nil
+	}
+	return err
+}
+
 func (m *CC1200Modem) routeIncomingByte(b byte, rxSource chan int8) {
 	m.mutex.Lock()
 	m.lastRXData = time.Now()
@@ -174,6 +284,9 @@ func (m *CC1200Modem) routeIncomingByte(b byte, rxSource chan int8) {
 		return
 	}
 	m.mutex.Unlock()
+	if rxSource == nil {
+		return
+	}
 	select {
 	case rxSource <- int8(b):
 		// delivered to pipeline
@@ -282,13 +395,21 @@ func (m *CC1200Modem) Close() error {
 	m.stopRX()
 	m.stopTX()
 	m.stopRXWatchdog()
-	m.nRST.Close()
-	m.paEnable.Close()
-	m.boot0.Close()
-	if m.debugLog != nil {
-		m.debugLog.Close()
+	var err error
+	if m.nRST != nil {
+		err = errors.Join(err, m.nRST.Close())
 	}
-	return m.modem.Close()
+	if m.paEnable != nil {
+		err = errors.Join(err, m.paEnable.Close())
+	}
+	if m.boot0 != nil {
+		err = errors.Join(err, m.boot0.Close())
+	}
+	if m.debugLog != nil {
+		err = errors.Join(err, m.debugLog.Close())
+	}
+	err = errors.Join(err, m.closePorts())
+	return err
 }
 
 // Read received symbols
@@ -688,7 +809,7 @@ func (m *CC1200Modem) writeSymbols(symbols []Symbol) error {
 	} else if time.Since(m.lastTXData) > 120*time.Millisecond {
 		log.Printf("[DEBUG] time.Since(m.lastTXData) >120ms: %v", time.Since(m.lastTXData))
 	}
-	_, err := m.modem.Write(buf)
+	_, err := m.bbPort.Write(buf)
 	m.lastTXData = time.Now()
 	return err
 }
@@ -725,7 +846,7 @@ func (m *CC1200Modem) command(cmd []byte) error {
 	cmd[1] = byte(len(cmd))
 	var err error
 	// log.Printf("[DEBUG] modem command(): % 2x", cmd)
-	_, err = m.modem.Write(cmd)
+	_, err = m.cmdPort.Write(cmd)
 	if err != nil {
 		return fmt.Errorf("command: %w", err)
 	}

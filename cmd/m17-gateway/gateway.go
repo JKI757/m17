@@ -17,28 +17,31 @@ import (
 )
 
 type config struct {
-	callsign         string
-	dashboardLogger  *slog.Logger
-	duplex           bool
-	rxFrequency      uint32
-	txFrequency      uint32
-	power            float32
-	afc              bool
-	frequencyCorr    int16
-	defaultReflector string
-	defaultModule    string
-	logLevel         string
-	logPath          string
-	logRoot          string
-	modemPort        string
-	modemSpeed       int
-	nRSTPin          int
-	paEnablePin      int
-	boot0Pin         int
-	symbolsIn        *os.File
-	symbolsOut       *os.File
-	hostfile         *m17.Hostfile
-	overrideHostfile *m17.Hostfile
+	callsign          string
+	dashboardLogger   *slog.Logger
+	duplex            bool
+	rxFrequency       uint32
+	txFrequency       uint32
+	power             float32
+	afc               bool
+	frequencyCorr     int16
+	defaultReflector  string
+	defaultModule     string
+	logLevel          string
+	logPath           string
+	logRoot           string
+	modemPort         string
+	modemCommandPort  string
+	modemBasebandPort string
+	useDualPort       bool
+	modemSpeed        int
+	nRSTPin           int
+	paEnablePin       int
+	boot0Pin          int
+	symbolsIn         *os.File
+	symbolsOut        *os.File
+	hostfile          *m17.Hostfile
+	overrideHostfile  *m17.Hostfile
 }
 
 func loadConfig(iniFile string, inFile string, outFile string) (config, error) {
@@ -64,10 +67,37 @@ func loadConfig(iniFile string, inFile string, outFile string) (config, error) {
 	logPath := cfg.Section("Log").Key("Path").String()
 	logRoot := cfg.Section("Log").Key("Root").String()
 	modemPort := cfg.Section("Modem").Key("Port").String()
+	modemCommandPort := cfg.Section("Modem").Key("CommandPort").String()
+	modemBasebandPort := cfg.Section("Modem").Key("BasebandPort").String()
+	dualPortKey := cfg.Section("Modem").Key("DualPort")
+	var dualPort bool
+	var dualPortErr error
+	if dualPortKey.Value() != "" {
+		dualPort, dualPortErr = dualPortKey.Bool()
+	}
+	if modemCommandPort != "" || modemBasebandPort != "" {
+		dualPort = true
+	}
 	modemSpeed, modemSpeedErr := cfg.Section("Modem").Key("Speed").Int()
 	nRSTPin, nRSTPinErr := cfg.Section("Modem").Key("NRSTPin").Int()
 	paEnablePin, paEnablePinErr := cfg.Section("Modem").Key("PAEnablePin").Int()
 	boot0Pin, boot0PinErr := cfg.Section("Modem").Key("Boot0Pin").Int()
+
+	var dualPortConfigErr error
+	if dualPort {
+		if modemCommandPort == "" {
+			modemCommandPort = modemPort
+		}
+		if modemCommandPort == "" {
+			dualPortConfigErr = errors.Join(dualPortConfigErr, fmt.Errorf("Modem.CommandPort must be set when DualPort is enabled"))
+		}
+		if modemBasebandPort == "" {
+			dualPortConfigErr = errors.Join(dualPortConfigErr, fmt.Errorf("Modem.BasebandPort must be set when DualPort is enabled"))
+		}
+		if modemCommandPort != "" && modemBasebandPort != "" && modemCommandPort == modemBasebandPort {
+			dualPortConfigErr = errors.Join(dualPortConfigErr, fmt.Errorf("Modem.CommandPort and Modem.BasebandPort must be distinct when DualPort is enabled"))
+		}
+	}
 
 	_, callsignErr := m17.EncodeCallsign(callsign)
 	// TODO: Lots of these validations are CC1200 specific
@@ -154,31 +184,36 @@ func loadConfig(iniFile string, inFile string, outFile string) (config, error) {
 		dashboardLogErr,
 		reflectorHostfileErr,
 		reflectorOverrideHostfileErr,
+		dualPortErr,
+		dualPortConfigErr,
 	)
 
 	return config{
-		callsign:         callsign,
-		duplex:           duplex,
-		rxFrequency:      uint32(rxFrequency),
-		txFrequency:      uint32(txFrequency),
-		power:            float32(power),
-		afc:              afc,
-		frequencyCorr:    int16(frequencyCorr),
-		defaultReflector: reflectorName,
-		defaultModule:    reflectorModule,
-		logLevel:         logLevel,
-		logPath:          logPath,
-		logRoot:          logRoot,
-		modemPort:        modemPort,
-		modemSpeed:       modemSpeed,
-		nRSTPin:          nRSTPin,
-		paEnablePin:      paEnablePin,
-		boot0Pin:         boot0Pin,
-		symbolsIn:        symbolsIn,
-		symbolsOut:       symbolsOut,
-		dashboardLogger:  dashboardLogger,
-		hostfile:         reflectorHostfile,
-		overrideHostfile: reflectorOverrideHostfile,
+		callsign:          callsign,
+		duplex:            duplex,
+		rxFrequency:       uint32(rxFrequency),
+		txFrequency:       uint32(txFrequency),
+		power:             float32(power),
+		afc:               afc,
+		frequencyCorr:     int16(frequencyCorr),
+		defaultReflector:  reflectorName,
+		defaultModule:     reflectorModule,
+		logLevel:          logLevel,
+		logPath:           logPath,
+		logRoot:           logRoot,
+		modemPort:         modemPort,
+		modemCommandPort:  modemCommandPort,
+		modemBasebandPort: modemBasebandPort,
+		useDualPort:       dualPort,
+		modemSpeed:        modemSpeed,
+		nRSTPin:           nRSTPin,
+		paEnablePin:       paEnablePin,
+		boot0Pin:          boot0Pin,
+		symbolsIn:         symbolsIn,
+		symbolsOut:        symbolsOut,
+		dashboardLogger:   dashboardLogger,
+		hostfile:          reflectorHostfile,
+		overrideHostfile:  reflectorOverrideHostfile,
 	}, err
 }
 
@@ -213,8 +248,16 @@ func main() {
 
 	var g *Gateway
 	var modem m17.Modem
-	if cfg.modemPort != "" {
-		modem, err = m17.NewCC1200Modem(cfg.modemPort, cfg.nRSTPin, cfg.paEnablePin, cfg.boot0Pin, cfg.modemSpeed)
+	if cfg.modemPort != "" || cfg.useDualPort {
+		commandPort := cfg.modemCommandPort
+		basebandPort := cfg.modemBasebandPort
+		if !cfg.useDualPort {
+			if commandPort == "" {
+				commandPort = cfg.modemPort
+			}
+			basebandPort = ""
+		}
+		modem, err = m17.NewCC1200Modem(commandPort, basebandPort, cfg.nRSTPin, cfg.paEnablePin, cfg.boot0Pin, cfg.modemSpeed)
 		if err != nil {
 			log.Fatalf("Error connecting to modem: %v", err)
 		}
@@ -223,7 +266,11 @@ func main() {
 		modem.SetTXPower(cfg.power)
 		modem.SetFreqCorrection(cfg.frequencyCorr)
 		modem.SetAFC(cfg.afc)
-		log.Printf("[INFO] Connected to modem on %s", cfg.modemPort)
+		if cfg.useDualPort {
+			log.Printf("[INFO] Connected to modem on command %s / baseband %s", commandPort, basebandPort)
+		} else {
+			log.Printf("[INFO] Connected to modem on %s", commandPort)
+		}
 	} else {
 		m := m17.DummyModem{
 			In:  cfg.symbolsIn,

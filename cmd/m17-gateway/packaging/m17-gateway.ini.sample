@@ -24,7 +24,12 @@ Module=C
 Level=DEBUG
 
 [Modem]
+# Uncomment the following to use a single serial connection (legacy firmware)
 Port=/dev/ttyAMA0
+# For dual-CDC firmware expose dedicated command/baseband interfaces.
+# CommandPort=/dev/ttyCC1200-CMD
+# BasebandPort=/dev/ttyCC1200-BB
+# DualPort=true
 Speed=460800
 NRSTPin=21
 PAEnablePin=18

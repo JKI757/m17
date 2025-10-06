@@ -50,6 +50,8 @@ Usage of gateway:
 
 Bu default, the gateway looks for configuration in `gateway.ini` in the working directory. See `m17-gateway/gateway.ini.sample` for details.
 
+Recent CC1200 firmware exposes separate USB CDC interfaces for command/control and baseband streaming. To take advantage of the dual-port mode, specify `CommandPort`, `BasebandPort`, and set `DualPort=true` in the `[Modem]` section. The legacy single-port `Port` option continues to work with older firmware and emulators.
+
 ### GUI Messaging Client
 
 [m17-message](./cmd/m17-message/) is a cross-platform GUI network messaging client. It's based on [Fybro](https://github.com/andydotxyz/fybro), a  messaging app built using [Fyne](https://fyne.io/), a fraemwork for building multi-platform GUI apps in Go. To build the client just run `go build` in the `m17-message` directory. For more packaging options, see the [Fyne docs](https://docs.fyne.io/started/packaging).
