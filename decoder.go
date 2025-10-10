@@ -75,8 +75,8 @@ func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
 		d.gotLSF = false
 		var e int
 		d.lsf, e = decodeLSF(softBits)
-		log.Printf("[DEBUG] Received RF LSF: %s", d.lsf)
 		if d.lsf.CheckCRC() {
+			log.Printf("[DEBUG] Received RF LSF: %s", d.lsf)
 			d.gotLSF = true
 			d.timeoutCnt = 0
 			d.lastStreamFN = 0xffff

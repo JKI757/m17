@@ -103,13 +103,27 @@ const (
 	mmdvmHWTypeSKYBRIDGE
 )
 
-type MMDVMModem struct {
-	frameSink func(typ uint16, softBits []SoftBit)
+type MMDVMConfig struct {
+	duplex      bool
+	rxInvert    bool
+	txInvert    bool
+	pttInvert   bool
+	debug       bool
+	txDCOffset  byte
+	txDelay     byte
+	rxLevel     float32
+	cwIdTXLevel float32
+	rxDCOffset  byte
+	fmTXLevel   float32
 
-	duplex     bool
 	m17Enabled bool
 	m17TXLevel float32
 	m17TXHang  byte
+}
+
+type MMDVMModem struct {
+	frameSink func(typ uint16, softBits []SoftBit)
+	config    MMDVMConfig
 
 	mutex sync.Mutex
 	// protected by mutex
@@ -159,10 +173,19 @@ func NewMMDVMModem(
 	}
 
 	m := &MMDVMModem{
-		duplex:     duplex,
-		m17Enabled: true, // TODO: from config
-		m17TXLevel: 50,
-		m17TXHang:  5,
+		config: MMDVMConfig{
+			duplex:   duplex,
+			txInvert: true,
+
+			txDelay:     100,
+			rxLevel:     50,
+			cwIdTXLevel: 50,
+			fmTXLevel:   50,
+
+			m17Enabled: true, // TODO: from config
+			m17TXLevel: 50,
+			m17TXHang:  5,
+		},
 	}
 	m.txTimer = time.AfterFunc(txTimeout, func() {
 		log.Printf("[DEBUG] TX timeout")
@@ -257,9 +280,57 @@ func (m *MMDVMModem) run() {
 			case mmdvmM17Lost:
 				log.Printf("[DEBUG] Received M17 Lost: [% 02x]", buf)
 			case mmdvmGetStatus:
+				log.Printf("[DEBUG] Received Get Status: [% 02x]", buf)
+				switch m.protocolVersion {
+				case 1:
+					// m_mode = m_buffer[m_offset + 1U];
+
+					// m_tx = (m_buffer[m_offset + 2U] & 0x01U) == 0x01U;
+					adcOverflow := (buf[2] & 0x02) == 0x02
+					if adcOverflow {
+						log.Print("[ERROR] MMDVM ADC levels have overflowed")
+					}
+					rxOverflow := (buf[2] & 0x04) == 0x04
+					if rxOverflow {
+						log.Print("[ERROR] MMDVM RX buffer has overflowed")
+					}
+					txOverflow := (buf[2] & 0x08) == 0x08
+					if txOverflow {
+						log.Print("[ERROR] MMDVM TX buffer has overflowed")
+					}
+					// lockout := (buf[2] & 0x10) == 0x10
+					dacOverflow := (buf[2] & 0x20) == 0x20
+					if dacOverflow {
+						log.Print("[ERROR] MMDVM DAC levels have overflowed")
+					}
+
+				case 2:
+					// m_mode = m_buffer[0]
+
+					// m_tx = (m_buffer[m_offset + 1U] & 0x01U) == 0x01U;
+					adcOverflow := (buf[1] & 0x02) == 0x02
+					if adcOverflow {
+						log.Print("[ERROR] MMDVM ADC levels have overflowed")
+					}
+					rxOverflow := (buf[1] & 0x04) == 0x04
+					if rxOverflow {
+						log.Print("[ERROR] MMDVM RX buffer has overflowed")
+					}
+					txOverflow := (buf[1] & 0x08) == 0x08
+					if txOverflow {
+						log.Print("[ERROR] MMDVM TX buffer has overflowed")
+					}
+					// lockout := (buf[1] & 0x10) == 0x10
+					dacOverflow := (buf[1] & 0x20) == 0x20
+					if dacOverflow {
+						log.Print("[ERROR] MMDVM DAC levels have overflowed")
+					}
+				}
 			case mmdvmTransparent:
+				log.Printf("[DEBUG] Received Transparent: [% 02x]", buf)
 			case mmdvmGetVersion:
 			case mmdvmSerialData:
+				log.Printf("[DEBUG] Received Serial Data: [% 02x]", buf)
 			case mmdvmACK:
 			case mmdvmNAK:
 				log.Printf("[WARN] Modem run getReponse() received a NAK, command: %02x, reason: %d", buf[0], buf[1])
@@ -368,7 +439,7 @@ retry:
 				break retry
 			case 2:
 				log.Printf("[INFO] MMDVM protocol version: 2, description: %s", buf[20:])
-				switch buf[6] {
+				switch buf[3] {
 				case 0:
 					log.Printf("[INFO] CPU: Atmel ARM, UDID: %02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X%02X", buf[4], buf[5], buf[6], buf[7], buf[8], buf[9], buf[10], buf[11], buf[12], buf[13], buf[14], buf[15], buf[16], buf[17], buf[18], buf[19])
 				case 1:
@@ -457,8 +528,8 @@ func (m *MMDVMModem) writeConfig() error {
 	switch m.protocolVersion {
 	case 1:
 		return m.setProtocol1Config()
-	// case 2:
-	// 	return m.setProtocol2Config()
+	case 2:
+		return m.setProtocol2Config()
 	default:
 		return ErrUnsupportedModemProtocol
 	}
@@ -474,82 +545,88 @@ func (m *MMDVMModem) setProtocol1Config() error {
 
 	cmd[2] = mmdvmSetConfig
 
-	cmd[3] = 0x00
-	// if (m.rxInvert) {
-	// 	cmd[3] |= 0x01
-	// }
-	// if (m.txInvert) {
-	// 	cmd[3] |= 0x02
-	// }
-	// if (m.pttInvert) {
-	// 	cmd[3] |= 0x04
-	// }
-	// if (m.ysfLoDev) {
+	if m.config.rxInvert {
+		cmd[3] |= 0x01
+	}
+	if m.config.txInvert {
+		cmd[3] |= 0x02
+	}
+	if m.config.pttInvert {
+		cmd[3] |= 0x04
+	}
+	// if (m.config.ysfLoDev) {
 	// 	cmd[3] |= 0x08
 	// }
-	// if (m.debug) {
-	// 	cmd[3] |= 0x10
-	// }
-	// if (m.useCOSAsLockout) {
+	if m.config.debug {
+		cmd[3] |= 0x10
+	}
+	// if (m.config.useCOSAsLockout) {
 	// 	cmd[3] |= 0x20
 	// }
-	if !m.duplex {
+	if !m.config.duplex {
 		cmd[3] |= 0x80
 	}
-	cmd[4] = 0x00
-	// if (m.dstarEnabled)
+	// if (m.config.dstarEnabled)
 	// 	cmd[4] |= 0x01
-	// if (m.dmrEnabled)
+	// if (m.config.dmrEnabled)
 	// 	cmd[4] |= 0x02
-	// if (m.ysfEnabled)
+	// if (m.config.ysfEnabled)
 	// 	cmd[4] |= 0x04
-	// if (m.p25Enabled)
+	// if (m.config.p25Enabled)
 	// 	cmd[4] |= 0x08
-	// if (m.nxdnEnabled)
+	// if (m.config.nxdnEnabled)
 	// 	cmd[4] |= 0x10
-	// if (m.pocsagEnabled)
+	// if (m.config.pocsagEnabled)
 	// 	cmd[4] |= 0x20
-	if m.m17Enabled {
+	if m.config.m17Enabled {
 		cmd[4] |= 0x40
 	}
 
-	// cmd[5] = m.txDelay / 10 // In 10ms units
+	cmd[5] = m.config.txDelay / 10 // In 10ms units
 
 	cmd[6] = mmdvmModeIdle
 
-	// cmd[7] = byte(m.rxLevel*2.55 + 0.5)
+	cmd[7] = byte(m.config.rxLevel*2.55 + 0.5)
 
-	// cmd[8] = byte(m.cwIdTXLevel*2.55 + 0.5)
+	cmd[8] = byte(m.config.cwIdTXLevel*2.55 + 0.5)
 
-	// cmd[9] = m.dmrColorCode
+	// cmd[9] = m.config.dmrColorCode
 
-	// cmd[10] = m.dmrDelay
+	// cmd[10] = m.config.dmrDelay
 
 	cmd[11] = 128 // Was OscOffset
 
-	// cmd[12] = byte(m.dstarTXLevel*2.55 + 0.5)
-	// cmd[13] = byte(m.dmrTXLevel*2.55 + 0.5)
-	// cmd[14] = byte(m.ysfTXLevel*2.55 + 0.5)
-	// cmd[15] = byte(m.p25TXLevel*2.55 + 0.5)
+	// cmd[12] = byte(m.config.dstarTXLevel*2.55 + 0.5)
+	cmd[12] = 128
+	// cmd[13] = byte(m.config.dmrTXLevel*2.55 + 0.5)
+	cmd[13] = 128
+	// cmd[14] = byte(m.config.ysfTXLevel*2.55 + 0.5)
+	cmd[14] = 128
+	// cmd[15] = byte(m.config.p25TXLevel*2.55 + 0.5)
+	cmd[15] = 128
 
-	// cmd[16] = byte(m.txDCOffset + 128)
-	// cmd[17] = byte(m.rxDCOffset + 128)
+	cmd[16] = byte(m.config.txDCOffset + 128)
+	cmd[17] = byte(m.config.rxDCOffset + 128)
 
-	// cmd[18] = byte(m.nxdnTXLevel*2.55 + 0.5)
+	// cmd[18] = byte(m.config.nxdnTXLevel*2.55 + 0.5)
+	cmd[18] = 128
 
-	// cmd[19] = byte(m.ysfTXHang)
+	// cmd[19] = byte(m.config.ysfTXHang)
+	cmd[19] = 0xE6
 
-	// cmd[20] = byte(m.pocsagTXLevel*2.55 + 0.5)
+	// cmd[20] = byte(m.config.pocsagTXLevel*2.55 + 0.5)
+	cmd[20] = 128
 
-	// cmd[21] = byte(m.fmTXLevel*2.55 + 0.5)
+	cmd[21] = byte(m.config.fmTXLevel*2.55 + 0.5)
 
-	// cmd[22] = byte(m.p25TXHang)
+	// cmd[22] = byte(m.config.p25TXHang)
 
-	// cmd[23] = byte(m.nxdnTXHang)
+	// cmd[23] = byte(m.config.nxdnTXHang)
+	cmd[23] = 4
 
-	cmd[24] = byte(m.m17TXLevel*2.55 + 0.5)
+	cmd[24] = byte(m.config.m17TXLevel*2.55 + 0.5)
 
-	cmd[25] = byte(m.m17TXHang)
+	cmd[25] = byte(m.config.m17TXHang)
 
 	log.Printf("[DEBUG] cmd: [% x]", cmd)
 	_, err := m.port.Write(cmd)
@@ -562,131 +639,145 @@ func (m *MMDVMModem) setProtocol1Config() error {
 	return err
 }
 
-// bool CModem::setConfig2()
-// {
-// 	assert(m.port != nullptr);
+func (m *MMDVMModem) setProtocol2Config() error {
+	log.Printf("[DEBUG] setProtocol2Config()")
+	// bool CModem::setConfig2()
+	// {
+	// 	assert(m.port != nullptr);
 
-// 	unsigned char buffer[50];
+	// 	unsigned char cmd[50];
+	cmd := make([]byte, 40)
 
-// 	buffer[0] = MMDVM_FRAME_START;
+	cmd[0] = mmdvmFrameStart
 
-// 	buffer[1] = 40
+	cmd[1] = 40
 
-// 	buffer[2] = MMDVM_SET_CONFIG;
+	cmd[2] = mmdvmSetConfig
 
-// 	buffer[3] = 0x00
-// 	if (m.rxInvert)
-// 		buffer[3] |= 0x01
-// 	if (m.txInvert)
-// 		buffer[3] |= 0x02
-// 	if (m.pttInvert)
-// 		buffer[3] |= 0x04
-// 	if (m.ysfLoDev)
-// 		buffer[3] |= 0x08
-// 	if (m.debug)
-// 		buffer[3] |= 0x10
-// 	if (m.useCOSAsLockout)
-// 		buffer[3] |= 0x20
-// 	if (!m.duplex)
-// 		buffer[3] |= 0x80
+	if m.config.rxInvert {
+		cmd[3] |= 0x01
+	}
+	if m.config.txInvert {
+		cmd[3] |= 0x02
+	}
+	if m.config.pttInvert {
+		cmd[3] |= 0x04
+	}
+	// if (m.config.ysfLoDev) {
+	// 	cmd[3] |= 0x08
+	// }
+	if m.config.debug {
+		cmd[3] |= 0x10
+	}
+	// if (m.config.useCOSAsLockout) {
+	// 	cmd[3] |= 0x20
+	// }
+	if !m.config.duplex {
+		cmd[3] |= 0x80
+	}
 
-// 	buffer[4] = 0x00
-// 	if (m.dstarEnabled)
-// 		buffer[4] |= 0x01
-// 	if (m.dmrEnabled)
-// 		buffer[4] |= 0x02
-// 	if (m.ysfEnabled)
-// 		buffer[4] |= 0x04
-// 	if (m.p25Enabled)
-// 		buffer[4] |= 0x08
-// 	if (m.nxdnEnabled)
-// 		buffer[4] |= 0x10
-// 	if (m.fmEnabled)
-// 		buffer[4] |= 0x20
-// 	if (m.m17Enabled)
-// 		buffer[4] |= 0x40
+	// if (m.config.dstarEnabled)
+	// 	cmd[4] |= 0x01
+	// if (m.config.dmrEnabled)
+	// 	cmd[4] |= 0x02
+	// if (m.config.ysfEnabled)
+	// 	cmd[4] |= 0x04
+	// if (m.config.p25Enabled)
+	// 	cmd[4] |= 0x08
+	// if (m.config.nxdnEnabled)
+	// 	cmd[4] |= 0x10
+	// if (m.config.fmEnabled)
+	// 	cmd[4] |= 0x20
+	if m.config.m17Enabled {
+		cmd[4] |= 0x40
+	}
 
-// 	buffer[5] = 0x00
-// 	if (m.pocsagEnabled)
-// 		buffer[5] |= 0x01
-// 	if (m.ax25Enabled)
-// 		buffer[5] |= 0x02
+	// buffer[5U] = 0x00U;
+	// if (m_pocsagEnabled)
+	// 	buffer[5U] |= 0x01U;
+	// if (m_ax25Enabled)
+	// 	buffer[5U] |= 0x02U;
 
-// 	buffer[6] = m.txDelay / 10		// In 10ms units
+	// buffer[6U] = m_txDelay / 10U;		// In 10ms units
+	cmd[6] = m.config.txDelay / 10 // In 10ms units
 
-// 	buffer[7] = MODE_IDLE;
+	// buffer[7U] = MODE_IDLE;
+	cmd[7] = mmdvmModeIdle
 
-// 	buffer[8] = byte(m.txDCOffset + 128);
-// 	buffer[9] = byte(m.rxDCOffset + 128);
+	// buffer[8U] = (unsigned char)(m_txDCOffset + 128);
+	cmd[8] = byte(m.config.txDCOffset + 128)
+	// buffer[9U] = (unsigned char)(m_rxDCOffset + 128);
+	cmd[9] = byte(m.config.rxDCOffset + 128)
 
-// 	buffer[10] = byte(m.rxLevel * 2.55F + 0.5F);
+	// buffer[10U] = (unsigned char)(m_rxLevel * 2.55F + 0.5F);
+	cmd[10] = byte(m.config.rxLevel*2.55 + 0.5)
 
-// 	buffer[11] = byte(m.cwIdTXLevel * 2.55F + 0.5F);
-// 	buffer[12] = byte(m.dstarTXLevel * 2.55F + 0.5F);
-// 	buffer[13] = byte(m.dmrTXLevel * 2.55F + 0.5F);
-// 	buffer[14] = byte(m.ysfTXLevel * 2.55F + 0.5F);
-// 	buffer[15] = byte(m.p25TXLevel * 2.55F + 0.5F);
-// 	buffer[16] = byte(m.nxdnTXLevel * 2.55F + 0.5F);
-// 	buffer[17] = byte(m.m17TXLevel * 2.55F + 0.5F);
-// 	buffer[18] = byte(m.pocsagTXLevel * 2.55F + 0.5F);
-// 	buffer[19] = byte(m.fmTXLevel * 2.55F + 0.5F);
-// 	buffer[20] = byte(m.ax25TXLevel * 2.55F + 0.5F);
-// 	buffer[21] = 0x00
-// 	buffer[22] = 0x00
+	// buffer[11U] = (unsigned char)(m_cwIdTXLevel * 2.55F + 0.5F);
+	cmd[11] = byte(m.config.cwIdTXLevel*2.55 + 0.5)
 
-// 	buffer[23] = bytem.ysfTXHang;
-// 	buffer[24] = bytem.p25TXHang;
-// 	buffer[25] = bytem.nxdnTXHang;
-// 	buffer[26] = bytem.m17TXHang;
-// 	buffer[27] = 0x00
-// 	buffer[28] = 0x00
+	// cmd[12] = byte(m.config.dstarTXLevel*2.55 + 0.5)
+	cmd[12] = 128
+	// cmd[13] = byte(m.config.dmrTXLevel*2.55 + 0.5)
+	cmd[13] = 128
+	// cmd[14] = byte(m.config.ysfTXLevel*2.55 + 0.5)
+	cmd[14] = 128
+	// cmd[15] = byte(m.config.p25TXLevel*2.55 + 0.5)
+	cmd[15] = 128
 
-// 	buffer[29] = m.dmrColorCode;
-// 	buffer[30] = m.dmrDelay;
+	// buffer[16U] = (unsigned char)(m_nxdnTXLevel * 2.55F + 0.5F);
+	cmd[16] = 128
+	// buffer[17U] = (unsigned char)(m_m17TXLevel * 2.55F + 0.5F);
+	cmd[17] = byte(m.config.m17TXLevel*2.55 + 0.5)
 
-// 	buffer[31] = byte(m.ax25RXTwist + 128);
-// 	buffer[32] = m.ax25TXDelay / 10		// In 10ms units
-// 	buffer[33] = m.ax25SlotTime / 10		// In 10ms units
-// 	buffer[34] = m.ax25PPersist;
+	// buffer[18U] = (unsigned char)(m_pocsagTXLevel * 2.55F + 0.5F);
+	cmd[18] = 128
+	// buffer[19U] = (unsigned char)(m_fmTXLevel * 2.55F + 0.5F);
+	cmd[19] = byte(m.config.fmTXLevel*2.55 + 0.5)
+	// buffer[20U] = (unsigned char)(m_ax25TXLevel * 2.55F + 0.5F);
+	cmd[20] = 128
 
-// 	buffer[35] = 0x00
-// 	buffer[36] = 0x00
-// 	buffer[37] = 0x00
-// 	buffer[38] = 0x00
-// 	buffer[39] = 0x00
+	// buffer[23U] = (unsigned char)m_ysfTXHang;
+	cmd[23] = 0x04
 
-// 	// CUtils::dump(1U, "Written", buffer, 40U);
+	// buffer[24U] = (unsigned char)m_p25TXHang;
+	cmd[24] = 0x05
+	// buffer[25U] = (unsigned char)m_nxdnTXHang;
+	cmd[25] = 0x05
+	// buffer[26U] = (unsigned char)m_m17TXHang;
+	cmd[26] = byte(m.config.m17TXHang)
 
-// 	int ret = m.port->write(buffer, 40U);
-// 	if (ret != 40)
-// 		return false;
+	// buffer[29U] = m_dmrColorCode;
+	cmd[29] = 0x01
+	// buffer[30U] = m_dmrDelay;
 
-// 	unsigned int count = 0
-// 	RESP_TYPE_MMDVM resp;
-// 	do {
-// 		CThread::sleep(10U);
+	// buffer[31U] = (unsigned char)(m_ax25RXTwist + 128);
+	cmd[31] = 0x86
+	// buffer[32U] = m_ax25TXDelay / 10U;		// In 10ms units
+	cmd[32] = 0x1E
+	// buffer[33U] = m_ax25SlotTime / 10U;		// In 10ms units
+	cmd[33] = 0x03
+	// buffer[34U] = m_ax25PPersist;
+	cmd[34] = 0x80
 
-// 		resp = getResponse();
-// 		if ((resp == RESP_TYPE_MMDVM::OK) && (m.buffer[2] != MMDVM_ACK) && (m.buffer[2] != MMDVM_NAK)) {
-// 			count++;
-// 			if (count >= MAX_RESPONSES) {
-// 				LogError("The MMDVM is not responding to the SET_CONFIG command");
-// 				return false;
-// 			}
-// 		}
-// 	} while ((resp == RESP_TYPE_MMDVM::OK) && (m.buffer[2] != MMDVM_ACK) && (m.buffer[2] != MMDVM_NAK));
+	// buffer[35U] = 0x00U;
+	// buffer[36U] = 0x00U;
+	// buffer[37U] = 0x00U;
+	// buffer[38U] = 0x00U;
+	// buffer[39U] = 0x00U;
 
-// 	// CUtils::dump(1U, "Response", m.buffer, m.length);
+	log.Printf("[DEBUG] cmd: [% x]", cmd)
+	_, err := m.port.Write(cmd)
+	if err != nil {
+		return fmt.Errorf("error writing SetConfig cmd: %w", err)
+	}
 
-// 	if ((resp == RESP_TYPE_MMDVM::OK) && (m.buffer[2] == MMDVM_NAK)) {
-// 		LogError("Received a NAK to the SET_CONFIG command from the modem");
-// 		return false;
-// 	}
+	err = m.getEmptyResponse()
 
-// 	m.playoutTimer.start();
+	// 	m.playoutTimer.start();
 
-// 	return true;
-// }
+	// return true;
+	return err
+}
 
 func (m *MMDVMModem) setMode(mode byte) error {
 	log.Printf("[DEBUG] setMode(%02x)", mode)
@@ -697,10 +788,11 @@ func (m *MMDVMModem) setMode(mode byte) error {
 
 func (m *MMDVMModem) getEmptyResponse() error {
 	var responseType byte
+	var buf []byte
 	var err error
 	for i := range 30 {
 		time.Sleep(10 * time.Millisecond)
-		responseType, _, err = m.getResponse()
+		responseType, buf, err = m.getResponse()
 		if i == 29 && err == nil && responseType != mmdvmACK && responseType != mmdvmNAK {
 			log.Printf("[ERROR] Modem not responding to command")
 			return errors.New("modem not responding")
@@ -709,11 +801,12 @@ func (m *MMDVMModem) getEmptyResponse() error {
 		}
 	}
 	if err == nil && responseType == mmdvmNAK {
-		log.Print("[ERROR] Received a NAK to the SetConfig command from the modem")
+		log.Printf("[ERROR] Received a NAK to the SetConfig command from the modem: % x", buf)
 		return ErrModemNAK
 	}
 	return err
 }
+
 func (m *MMDVMModem) getResponse() (byte, []byte, error) {
 	var n int
 	var err error
