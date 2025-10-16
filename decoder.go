@@ -58,7 +58,7 @@ type Decoder struct {
 // plus some extra so we can make larger reads
 const symbolBufSize = 8*5 + 2*(8*5+4800/25*5) + 2 + 256
 
-func NewDecoder(dashLog *slog.Logger, sendToNetwork func(lsf *LSF, payload []byte, sid, fn uint16) error, duplex bool) *Decoder {
+func NewDecoder(dashLog *slog.Logger, sendToNetwork func(lsf *LSF, payload []byte, sid, fn uint16) error) *Decoder {
 	d := Decoder{
 		sendToNetwork: sendToNetwork,
 		lastPacketFN:  0xff,
@@ -127,8 +127,6 @@ func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
 				d.syncedType = PacketSync
 				d.packetData = make([]byte, 33*25)
 			}
-		} else {
-			log.Print("[DEBUG] Bad LSF CRC")
 		}
 
 	case typ == PacketSync && d.syncedType == PacketSync:
@@ -155,14 +153,13 @@ func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
 		}
 		// log.Printf("[DEBUG] frameData: % x %s", pktFrame, pktFrame)
 
-		//copy data - might require some fixing
 		if frameNumOrByteCnt <= 31 && frameNumOrByteCnt == d.lastPacketFN+1 && !lastFrame {
 			copy(d.packetData[frameNumOrByteCnt*25:(frameNumOrByteCnt+1)*25], pktFrame)
 			d.lastPacketFN++
 		} else if lastFrame {
 			copy(d.packetData[(d.lastPacketFN+1)*25:(d.lastPacketFN+1)*25+frameNumOrByteCnt], pktFrame[:frameNumOrByteCnt])
 			d.packetData = d.packetData[:(d.lastPacketFN+1)*25+frameNumOrByteCnt]
-			log.Printf("[DEBUG] pktFrame[:frameNumOrByteCnt]: % 0x, d.packetData: % 0x", pktFrame[:frameNumOrByteCnt], d.packetData)
+			// log.Printf("[DEBUG] pktFrame[:frameNumOrByteCnt]: % 0x, d.packetData: % 0x", pktFrame[:frameNumOrByteCnt], d.packetData)
 			if CRC(d.packetData) == 0 {
 				// log.Printf("[DEBUG] d.lsf: %v, d.packetData: %v", d.lsf, d.packetData)
 				d.sendToNetwork(d.lsf, d.packetData, 0, 0)
@@ -188,7 +185,7 @@ func (d *Decoder) DecodeFrame(typ uint16, softBits []SoftBit) {
 		var e int
 		var fn uint16
 		d.frameData, lich, fn, lichCnt, e = d.decodeStreamFrame(softBits)
-		log.Printf("[DEBUG] frameData: [% 2x], lich: %02x, lichCnt: %d, d.lichParts: %04x, fn: %04x, d.lastStreamFN: %04x, e: %d", d.frameData, lich, lichCnt, d.lichParts, fn, d.lastStreamFN, e)
+		// log.Printf("[DEBUG] frameData: [% 2x], lich: %02x, lichCnt: %d, d.lichParts: %04x, fn: %04x, d.lastStreamFN: %04x, e: %d", d.frameData, lich, lichCnt, d.lichParts, fn, d.lastStreamFN, e)
 		d.errors += e
 		d.bits += 272
 		if d.lastStreamFN+1 == fn&0x7fff {
@@ -290,13 +287,9 @@ func decodeLSF(softBit []SoftBit) (*LSF, int) {
 	// log.Printf("[DEBUG] decodeLSF: len(pld): %d", len(pld))
 	// log.Printf("[DEBUG] softBit: %#v", softBit)
 
-	//derandomize
 	softBit = DerandomizeSoftBits(softBit)
-	// log.Printf("[DEBUG] derandomized softBit: %#v", softBit)
 
-	//deinterleave
 	dSoftBit := DeinterleaveSoftBits(softBit)
-	// log.Printf("[DEBUG] dSoftBit: %#v", dSoftBit)
 
 	//decode
 	vd := ViterbiDecoder{}
@@ -304,12 +297,9 @@ func decodeLSF(softBit []SoftBit) (*LSF, int) {
 	e = e - len(LSFPuncturePattern) + 1
 
 	//shift the buffer 1 position left - get rid of the encoded flushing bits
-	// copy(lsf, lsf[1:])
 	lsf = lsf[1 : LSFLen+1]
 	// log.Printf("[DEBUG] lsf: %x", lsf)
-	if CRC(lsf) != 0 {
-		log.Printf("[DEBUG] Bad LSF CRC: %x", CRC(lsf))
-	} else {
+	if CRC(lsf) == 0 {
 		dst, err := DecodeCallsign(lsf[0:6])
 		if err != nil {
 			log.Printf("[ERROR] Bad dst callsign: %v", err)
@@ -319,8 +309,10 @@ func decodeLSF(softBit []SoftBit) (*LSF, int) {
 			log.Printf("[ERROR] Bad src callsign: %v", err)
 		}
 		log.Printf("[DEBUG] dest: %s, src: %s", dst, src)
+		log.Printf("[DEBUG] LSF BER: %1.1f", float64(e)/3.68)
+		// } else {
+		// 	log.Printf("[DEBUG] Bad LSF CRC: %x", CRC(lsf))
 	}
-	log.Printf("[DEBUG] LSF BER: %1.1f", float64(e)/3.68)
 	l := NewLSFFromBytes(lsf)
 	return l, e
 }
@@ -329,16 +321,10 @@ func (d *Decoder) decodeStreamFrame(softBit []SoftBit) (frameData []byte, lich [
 	// log.Printf("[DEBUG] decodeStreamFrame: len(pld): %d", len(pld))
 	// log.Printf("[DEBUG] pld: [% 1.1f]", pld)
 
-	// softBit := calcSoftbits(pld)
-	// log.Printf("[DEBUG] softBit: [% 04x]", softBit)
-
-	//derandomize
 	softBit = DerandomizeSoftBits(softBit)
-	// log.Printf("[DEBUG] derandomized softBit: [% 04x]", softBit)
 
-	//deinterleave
 	dSoftBit := DeinterleaveSoftBits(softBit)
-	// log.Printf("[DEBUG] deinterleaved softBit: [% 04x]", dSoftBit)
+
 	lich = DecodeLICH(dSoftBit[:96])
 	lichCnt = lich[5] >> 5
 
@@ -360,14 +346,9 @@ func (d *Decoder) decodePacketFrame(softBit []SoftBit) ([]byte, int) {
 	// log.Printf("[DEBUG] decodePacketFrame: len(pld): %d", len(pld))
 	// log.Printf("[DEBUG] pld: %#v", pld)
 
-	// softBit := calcSoftbits(pld)
-	// log.Printf("[DEBUG] softBit: %#v", softBit)
-
-	//derandomize
 	softBit = DerandomizeSoftBits(softBit)
 	// log.Printf("[DEBUG] derandomized softBit: %#v", softBit)
 
-	//deinterleave
 	dSoftBit := DeinterleaveSoftBits(softBit)
 	// log.Printf("[DEBUG] dSoftBit: %#v", dSoftBit)
 
@@ -387,7 +368,6 @@ func calcSoftbits(pld []Symbol) []SoftBit {
 	softBit := make([]SoftBit, 2*SymbolsPerPayload) //raw frame soft bits
 
 	for i, sym := range pld {
-
 		//bit 0
 		if sym >= SymbolList[3] {
 			softBit[i*2+1] = softTrue

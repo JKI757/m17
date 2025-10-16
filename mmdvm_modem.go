@@ -1,6 +1,7 @@
 package m17
 
 import (
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
@@ -131,13 +132,9 @@ type MMDVMModem struct {
 	exit bool
 	// end protected by mutex
 
-	capabilities        [2]byte
-	hwType              byte
-	protocolVersion     byte
-	txTimer             *time.Timer
-	lastTXData          time.Time
-	lastStatusCheck     time.Time
-	lastInactivityCheck time.Time
+	capabilities    [2]byte
+	hwType          byte
+	protocolVersion byte
 }
 
 func NewMMDVMModem(
@@ -174,7 +171,8 @@ func NewMMDVMModem(
 
 	m := &MMDVMModem{
 		config: MMDVMConfig{
-			duplex:   duplex,
+			duplex: duplex,
+			// TODO: Get all of these values from the INI file
 			txInvert: true,
 
 			txDelay:     100,
@@ -182,19 +180,11 @@ func NewMMDVMModem(
 			cwIdTXLevel: 50,
 			fmTXLevel:   50,
 
-			m17Enabled: true, // TODO: from config
+			m17Enabled: true,
 			m17TXLevel: 50,
 			m17TXHang:  5,
 		},
 	}
-	m.txTimer = time.AfterFunc(txTimeout, func() {
-		log.Printf("[DEBUG] TX timeout")
-		// ret.stopTX()
-		// ret.Start()
-	})
-	m.lastTXData = time.Now()
-	// Stop it until we transmit
-	m.txTimer.Stop()
 	log.Printf("[DEBUG] Opening modem")
 	mode := &serial.Mode{
 		BaudRate: speed,
@@ -205,12 +195,6 @@ func NewMMDVMModem(
 	}
 	p.SetReadTimeout(0) // Non-blocking reads
 	m.port = p
-	// rxSource := make(chan int8, samplesPerSecond)
-	// ret.rxSymbols, err = ret.rxPipeline(rxSource)
-	// if err != nil {
-	// 	return nil, fmt.Errorf("rx pipeline setup: %w", err)
-	// }
-	// go ret.processReceivedData(rxSource)
 	err = m.readVersion()
 	if err != nil {
 		return nil, err
@@ -245,12 +229,6 @@ func (m *MMDVMModem) run() {
 	log.Printf("[DEBUG] modem start running")
 	m.setExit(false)
 	for !m.isExit() {
-		if expired(&m.lastStatusCheck, 250*time.Millisecond) {
-			// m.readStatus()
-		}
-		if expired(&m.lastInactivityCheck, 2*time.Second) {
-			// close and reopen
-		}
 		m.mutex.Lock()
 		responseType, buf, err := m.getResponse()
 		m.mutex.Unlock()
@@ -261,31 +239,27 @@ func (m *MMDVMModem) run() {
 		} else {
 			switch responseType {
 			case mmdvmM17LinkSetup:
-				log.Printf("[DEBUG] Received M17 LSF: [% 02x]", buf)
+				// log.Printf("[DEBUG] Received M17 LSF: [% 02x]", buf)
 				sb := bytesToSoftBits(buf[3 : 46+3])
-				// log.Printf("[DEBUG] M17 LSF Softbits: [% v]", sb)
 				m.frameSink(LSFSync, sb)
 			case mmdvmM17Stream:
-				log.Printf("[DEBUG] Received M17 Stream frame: [% 02x]", buf)
+				// log.Printf("[DEBUG] Received M17 Stream frame: [% 02x]", buf)
 				sb := bytesToSoftBits(buf[3 : 46+3])
 				m.frameSink(StreamSync, sb)
 			case mmdvmM17Packet:
-				log.Printf("[DEBUG] Received M17 Packet frame: [% 02x]", buf)
+				// log.Printf("[DEBUG] Received M17 Packet frame: [% 02x]", buf)
 				sb := bytesToSoftBits(buf[3 : 46+3])
 				m.frameSink(PacketSync, sb)
 			case mmdvmM17EOT:
-				log.Printf("[DEBUG] Received M17 EOT: [% 02x]", buf)
+				// log.Printf("[DEBUG] Received M17 EOT: [% 02x]", buf)
 				sb := bytesToSoftBits(buf[3 : 46+3])
 				m.frameSink(EOTMarker, sb)
 			case mmdvmM17Lost:
-				log.Printf("[DEBUG] Received M17 Lost: [% 02x]", buf)
+				// log.Printf("[DEBUG] Received M17 Lost: [% 02x]", buf)
 			case mmdvmGetStatus:
 				log.Printf("[DEBUG] Received Get Status: [% 02x]", buf)
 				switch m.protocolVersion {
 				case 1:
-					// m_mode = m_buffer[m_offset + 1U];
-
-					// m_tx = (m_buffer[m_offset + 2U] & 0x01U) == 0x01U;
 					adcOverflow := (buf[2] & 0x02) == 0x02
 					if adcOverflow {
 						log.Print("[ERROR] MMDVM ADC levels have overflowed")
@@ -298,16 +272,11 @@ func (m *MMDVMModem) run() {
 					if txOverflow {
 						log.Print("[ERROR] MMDVM TX buffer has overflowed")
 					}
-					// lockout := (buf[2] & 0x10) == 0x10
 					dacOverflow := (buf[2] & 0x20) == 0x20
 					if dacOverflow {
 						log.Print("[ERROR] MMDVM DAC levels have overflowed")
 					}
-
 				case 2:
-					// m_mode = m_buffer[0]
-
-					// m_tx = (m_buffer[m_offset + 1U] & 0x01U) == 0x01U;
 					adcOverflow := (buf[1] & 0x02) == 0x02
 					if adcOverflow {
 						log.Print("[ERROR] MMDVM ADC levels have overflowed")
@@ -320,7 +289,6 @@ func (m *MMDVMModem) run() {
 					if txOverflow {
 						log.Print("[ERROR] MMDVM TX buffer has overflowed")
 					}
-					// lockout := (buf[1] & 0x10) == 0x10
 					dacOverflow := (buf[1] & 0x20) == 0x20
 					if dacOverflow {
 						log.Print("[ERROR] MMDVM DAC levels have overflowed")
@@ -329,34 +297,38 @@ func (m *MMDVMModem) run() {
 			case mmdvmTransparent:
 				log.Printf("[DEBUG] Received Transparent: [% 02x]", buf)
 			case mmdvmGetVersion:
+				// ignore
 			case mmdvmSerialData:
 				log.Printf("[DEBUG] Received Serial Data: [% 02x]", buf)
 			case mmdvmACK:
+				// ignore
 			case mmdvmNAK:
 				log.Printf("[WARN] Modem run getReponse() received a NAK, command: %02x, reason: %d", buf[0], buf[1])
 			case mmdvmDebug1, mmdvmDebug2, mmdvmDebug3, mmdvmDebug4, mmdvmDebug5, mmdvmDebugDump:
-			// if (m_type == MMDVM_DEBUG1) {
-			// 	LogMessage("Debug: %.*s", m_length - m_offset - 0U, m_buffer + m_offset);
-			// } else if (m_type == MMDVM_DEBUG2) {
-			// 	short val1 = (m_buffer[m_length - 2U] << 8) | m_buffer[m_length - 1U];
-			// 	LogMessage("Debug: %.*s %d", m_length - m_offset - 2U, m_buffer + m_offset, val1);
-			// } else if (m_type == MMDVM_DEBUG3) {
-			// 	short val1 = (m_buffer[m_length - 4U] << 8) | m_buffer[m_length - 3U];
-			// 	short val2 = (m_buffer[m_length - 2U] << 8) | m_buffer[m_length - 1U];
-			// 	LogMessage("Debug: %.*s %d %d", m_length - m_offset - 4U, m_buffer + m_offset, val1, val2);
-			// } else if (m_type == MMDVM_DEBUG4) {
-			// 	short val1 = (m_buffer[m_length - 6U] << 8) | m_buffer[m_length - 5U];
-			// 	short val2 = (m_buffer[m_length - 4U] << 8) | m_buffer[m_length - 3U];
-			// 	short val3 = (m_buffer[m_length - 2U] << 8) | m_buffer[m_length - 1U];
-			// 	LogMessage("Debug: %.*s %d %d %d", m_length - m_offset - 6U, m_buffer + m_offset, val1, val2, val3);
-			// } else if (m_type == MMDVM_DEBUG5) {
-			// 	short val1 = (m_buffer[m_length - 8U] << 8) | m_buffer[m_length - 7U];
-			// 	short val2 = (m_buffer[m_length - 6U] << 8) | m_buffer[m_length - 5U];
-			// 	short val3 = (m_buffer[m_length - 4U] << 8) | m_buffer[m_length - 3U];
-			// 	short val4 = (m_buffer[m_length - 2U] << 8) | m_buffer[m_length - 1U];
-			// 	LogMessage("Debug: %.*s %d %d %d %d", m_length - m_offset - 8U, m_buffer + m_offset, val1, val2, val3, val4);
-			// } else if (m_type == MMDVM_DEBUG_DUMP) {
-			// 	CUtils::dump(1U, "Debug: Data", m_buffer + m_offset, m_length - m_offset);
+				switch responseType {
+				case mmdvmDebug1:
+					log.Printf("[DEBUG] MMDVM debug: %s", buf)
+				case mmdvmDebug2:
+					val1 := decodeValue(buf[len(buf)-2:])
+					log.Printf("[DEBUG] MMDVM debug: %s %d", buf[:len(buf)-2], val1)
+				case mmdvmDebug3:
+					val1 := decodeValue(buf[len(buf)-4 : len(buf)-2])
+					val2 := decodeValue(buf[len(buf)-2:])
+					log.Printf("[DEBUG] MMDVM debug: %s %d %d", buf[:len(buf)-4], val1, val2)
+				case mmdvmDebug4:
+					val1 := decodeValue(buf[len(buf)-6 : len(buf)-4])
+					val2 := decodeValue(buf[len(buf)-4 : len(buf)-2])
+					val3 := decodeValue(buf[len(buf)-2:])
+					log.Printf("[DEBUG] MMDVM debug: %s %d %d %d", buf[:len(buf)-6], val1, val2, val3)
+				case mmdvmDebug5:
+					val1 := decodeValue(buf[len(buf)-8 : len(buf)-6])
+					val2 := decodeValue(buf[len(buf)-6 : len(buf)-4])
+					val3 := decodeValue(buf[len(buf)-4 : len(buf)-2])
+					val4 := decodeValue(buf[len(buf)-2:])
+					log.Printf("[DEBUG] MMDVM debug: %s %d %d %d %d", buf[:len(buf)-8], val1, val2, val3, val4)
+				case mmdvmDebugDump:
+					log.Printf("[DEBUG] MMDVM debug data: [% 2x]", buf)
+				}
 			default:
 				log.Printf("[DEBUG] Unexpected modem response, type: %2x, buf: [% 2x]", responseType, buf)
 			}
@@ -364,6 +336,16 @@ func (m *MMDVMModem) run() {
 
 	}
 	log.Printf("[DEBUG] modem stop running")
+}
+
+func decodeValue(buf []byte) int16 {
+	var val int16
+	_, err := binary.Decode(buf, binary.BigEndian, &val)
+	if err != nil {
+		// should never happen
+		log.Printf("[ERROR] Error decoding value: %v", err)
+	}
+	return val
 }
 
 func bytesToSoftBits(buf []byte) []SoftBit {
@@ -377,13 +359,6 @@ func bytesToSoftBits(buf []byte) []SoftBit {
 			}
 			b <<= 1
 		}
-	}
-	return ret
-}
-func expired(t *time.Time, duration time.Duration) bool {
-	ret := time.Since(*t) > duration
-	if ret {
-		*t = time.Now()
 	}
 	return ret
 }
@@ -512,7 +487,6 @@ func (m *MMDVMModem) setFrequency(rxFreq, txFreq uint32, power float32) error {
 	cmd[10] = byte((txFreq >> 16) & 0xFF)
 	cmd[11] = byte((txFreq >> 24) & 0xFF)
 
-	log.Printf("[DEBUG] cmd: [% x]", cmd)
 	_, err := m.port.Write(cmd)
 	if err != nil {
 		return fmt.Errorf("error writing setFrequency cmd: %w", err)
@@ -536,7 +510,6 @@ func (m *MMDVMModem) writeConfig() error {
 }
 
 func (m *MMDVMModem) setProtocol1Config() error {
-	log.Printf("[DEBUG] setProtocol1Config()")
 	cmd := make([]byte, 30)
 
 	cmd[0] = mmdvmFrameStart
@@ -628,24 +601,18 @@ func (m *MMDVMModem) setProtocol1Config() error {
 
 	cmd[25] = byte(m.config.m17TXHang)
 
-	log.Printf("[DEBUG] cmd: [% x]", cmd)
+	// log.Printf("[DEBUG] cmd: [% x]", cmd)
 	_, err := m.port.Write(cmd)
 	if err != nil {
 		return fmt.Errorf("error writing SetConfig cmd: %w", err)
 	}
 
 	err = m.getEmptyResponse()
-	// m.playoutTimer.start();
 	return err
 }
 
 func (m *MMDVMModem) setProtocol2Config() error {
-	log.Printf("[DEBUG] setProtocol2Config()")
-	// bool CModem::setConfig2()
-	// {
-	// 	assert(m.port != nullptr);
-
-	// 	unsigned char cmd[50];
+	// log.Printf("[DEBUG] setProtocol2Config()")
 	cmd := make([]byte, 40)
 
 	cmd[0] = mmdvmFrameStart
@@ -765,7 +732,7 @@ func (m *MMDVMModem) setProtocol2Config() error {
 	// buffer[38U] = 0x00U;
 	// buffer[39U] = 0x00U;
 
-	log.Printf("[DEBUG] cmd: [% x]", cmd)
+	// log.Printf("[DEBUG] cmd: [% x]", cmd)
 	_, err := m.port.Write(cmd)
 	if err != nil {
 		return fmt.Errorf("error writing SetConfig cmd: %w", err)
@@ -868,7 +835,6 @@ func (m *MMDVMModem) getResponse() (byte, []byte, error) {
 			return responseType, nil, ErrMMDVMReadTimeout
 		}
 		length = int(buffer[offset]) + 255
-		// log.Printf("[DEBUG] Modem mmdvmSerialStateLength2 read %d, length %d", buffer[offset], length)
 		offset++
 		state = mmdvmSerialStateType
 	}
@@ -884,7 +850,7 @@ func (m *MMDVMModem) getResponse() (byte, []byte, error) {
 			return responseType, nil, ErrMMDVMReadTimeout
 		}
 		responseType = buffer[offset]
-		log.Printf("[DEBUG] Modem mmdvmSerialStateType read 0x%x", buffer[offset])
+		// log.Printf("[DEBUG] Modem mmdvmSerialStateType read 0x%x", buffer[offset])
 		offset++
 		state = mmdvmSerialStateData
 	}
@@ -930,7 +896,6 @@ func (m *MMDVMModem) TransmitPacket(p Packet) error {
 	var bits []Bit
 	var err error
 
-	log.Printf("[DEBUG] TransmitPacket send LSF")
 	err = m.transmitLSF(*p.LSF)
 	if err != nil {
 		return fmt.Errorf("failed to send packet LSF: %w", err)
@@ -975,12 +940,11 @@ func (m *MMDVMModem) TransmitPacket(p Packet) error {
 	if err != nil {
 		return fmt.Errorf("failed to send EOT: %w", err)
 	}
-	log.Printf("[DEBUG] Finished TransmitPacket")
 	return nil
 }
 
 func (m *MMDVMModem) transmitLSF(lsf LSF) error {
-	log.Printf("[DEBUG] transmitLSF: %s", lsf)
+	// log.Printf("[DEBUG] transmitLSF: %s", lsf)
 	bits, err := generateLSFBits(lsf)
 	if err != nil {
 		return fmt.Errorf("failed to generate LSF bits: %w", err)
@@ -993,12 +957,11 @@ func (m *MMDVMModem) transmitLSF(lsf LSF) error {
 }
 
 func (m *MMDVMModem) TransmitVoiceStream(sd StreamDatagram) error {
-	log.Printf("[DEBUG] TransmitVoiceStream id: %04x, fn: %04x, last: %v", sd.StreamID, sd.FrameNumber, sd.LastFrame)
+	// log.Printf("[DEBUG] TransmitVoiceStream id: %04x, fn: %04x, last: %v", sd.StreamID, sd.FrameNumber, sd.LastFrame)
 	var bits []Bit
 	var err error
 
 	if sd.FrameNumber == 0 && sd.LSF != nil { // first frame
-		log.Printf("[DEBUG] TransmitVoiceStream send LSF")
 		err = m.transmitLSF(*sd.LSF)
 		if err != nil {
 			return fmt.Errorf("failed to send stream LSF: %w", err)
@@ -1008,33 +971,30 @@ func (m *MMDVMModem) TransmitVoiceStream(sd StreamDatagram) error {
 	if err != nil {
 		return fmt.Errorf("failed to generate stream bits: %w", err)
 	}
-	log.Printf("[DEBUG] TransmitVoiceStream sending bits")
 	err = m.writeBits(mmdvmM17Stream, bits)
 	if err != nil {
 		return fmt.Errorf("failed to send stream frame: %w", err)
 	}
 	if sd.LastFrame {
 		// send EOT
-		log.Printf("[DEBUG] Sending EOT for stream %04x, fn %04x", sd.StreamID, sd.FrameNumber)
 		err = m.writeEOT()
 		if err != nil {
 			return fmt.Errorf("failed to send EOT: %w", err)
 		}
-		log.Printf("[DEBUG] Finished TransmitVoiceStream")
 	}
 	return nil
 }
 
 func (m *MMDVMModem) writeBits(typ byte, bits []Bit) error {
 	buf := packBits(bits)
-	log.Printf("[DEBUG] writeBits type: %02x, len: %d, buf: % 02x", typ, len(buf), buf)
+	// log.Printf("[DEBUG] writeBits type: %02x, len: %d, buf: % 02x", typ, len(buf), buf)
 	cmd := []byte{mmdvmFrameStart, byte(4 + len(buf)), typ, 0}
 	cmd = append(cmd, buf...)
 	_, err := m.port.Write(cmd)
 	return err
 }
 func (m *MMDVMModem) writeEOT() error {
-	log.Printf("[DEBUG] writeEOT")
+	// log.Printf("[DEBUG] writeEOT")
 	cmd := []byte{mmdvmFrameStart, 3, mmdvmM17EOT}
 	_, err := m.port.Write(cmd)
 	return err

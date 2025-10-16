@@ -380,7 +380,7 @@ func (g *Gateway) SendToNetwork(lsf *m17.LSF, payload []byte, sid, fn uint16) er
 
 func (g *Gateway) Run() {
 	signalChan := make(chan os.Signal, 1)
-	d := m17.NewDecoder(g.dashboardLogger, g.SendToNetwork, g.duplex)
+	d := m17.NewDecoder(g.dashboardLogger, g.SendToNetwork)
 	g.modem.StartDecoding(d.DecodeFrame)
 	// Run until we're terminated then clean up
 	log.Print("[DEBUG] client: Waiting for close signal")

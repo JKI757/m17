@@ -6,11 +6,6 @@ import (
 
 const (
 	samplesPerSecond = 24000
-
-// samplesPer40MS   = samplesPerSecond / 1000 * 40
-// samplesPerSymbol = 5
-// symbolsPerSecond = samplesPerSecond / 5
-// symbolsPer40MS   = symbolsPerSecond / 1000 * 40
 )
 
 type Modem interface {
@@ -18,11 +13,6 @@ type Modem interface {
 	Start() error
 	Reset() error
 	Close() error
-	// SetAFC(afc bool) error
-	// SetFreqCorrection(corr int16) error
-	// SetRXFreq(freq uint32) error
-	// SetTXFreq(freq uint32) error
-	// SetTXPower(dbm float32) error
 	TransmitPacket(Packet) error
 	TransmitVoiceStream(StreamDatagram) error
 }
@@ -45,7 +35,6 @@ func extractPayload(dist float32, typ uint16, symbols []Symbol) ([]Symbol, []Sof
 		pld[i] = symbols[i*5]
 	}
 	softBits := calcSoftbits(pld)
-	// log.Printf("[DEBUG] pld: % .2f", pld)
 	// skip by most, but not all of the payload
 	// if we skip everything we miss the next packet for some reason.
 	symbols = symbols[(SymbolsPerPayload-offset-16)*5:]
@@ -118,9 +107,6 @@ func generateStreamSymbols(sd StreamDatagram) ([]Symbol, error) {
 	rfBits = RandomizeBits(rfBits)
 	syms = AppendBits(syms, rfBits)
 	// log.Printf("[DEBUG] len(syms): %d, syms: [% v]", len(syms), syms)
-	// d := NewDecoder()
-	// frameData, li, fn, lichCnt, vd := d.decodeStreamFrame(syms[8:])
-	// log.Printf("[DEBUG] frameData: [% 2x], lich: %x, lichCnt: %d, fn: %x, FN: %d, vd: %1.1f", frameData, li, lichCnt, fn, (fn>>8)|((fn&0xFF)<<8), vd)
 	return syms, nil
 }
 
