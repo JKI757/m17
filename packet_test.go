@@ -19,7 +19,7 @@ func TestPacket_ToBytes(t *testing.T) {
 	}{
 		{"empty",
 			fields{
-				LSF:     NewLSFFromBytes([]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}),
+				LSF:     *NewLSFFromBytes([]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}),
 				Type:    PacketType(0),
 				Payload: []byte{},
 				CRC:     0,
@@ -58,7 +58,7 @@ func TestPacket_ToBytes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := &Packet{
-				LSF:     tt.fields.LSF,
+				LSF:     &tt.fields.LSF,
 				Type:    tt.fields.Type,
 				Payload: tt.fields.Payload,
 				CRC:     tt.fields.CRC,

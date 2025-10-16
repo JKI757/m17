@@ -279,6 +279,7 @@ func (r *Relay) handle() {
 		case magicM17Packet: // M17 packet
 			if r.packetHandler != nil {
 				p := NewPacketFromBytes(buffer[4:])
+				// log.Printf("[DEBUG] Received packet from reflector. buffer: % 02x, buffer len: %d, p: %v", buffer[4:], len(buffer[4:]), p)
 				r.packetHandler(p)
 				if r.dashLog != nil {
 					if p.Type == PacketTypeSMS && len(p.Payload) > 0 {
@@ -308,7 +309,7 @@ func (r *Relay) SendPacket(p Packet) error {
 	return nil
 }
 
-func (r *Relay) SendStream(lsf LSF, sid uint16, fn uint16, payload []byte) error {
+func (r *Relay) SendStream(lsf *LSF, sid uint16, fn uint16, payload []byte) error {
 	sd := NewStreamDatagram(sid, fn, lsf, payload)
 	// log.Printf("[DEBUG] Send StreamDatagram: %s", sd)
 	_, err := r.conn.Write(sd.ToBytes())
@@ -357,7 +358,7 @@ type StreamDatagram struct {
 	StreamID    uint16
 	FrameNumber uint16
 	LastFrame   bool
-	LSF         LSF
+	LSF         *LSF
 	Payload     [16]byte
 }
 
@@ -389,7 +390,7 @@ func NewStreamDatagramFromBytes(buffer []byte) (StreamDatagram, error) {
 	return sd, nil
 }
 
-func NewStreamDatagram(streamID uint16, frameNumber uint16, lsf LSF, payload []byte) StreamDatagram {
+func NewStreamDatagram(streamID uint16, frameNumber uint16, lsf *LSF, payload []byte) StreamDatagram {
 	sd := StreamDatagram{
 		StreamID:    streamID,
 		FrameNumber: frameNumber,

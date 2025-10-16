@@ -1,127 +1,139 @@
 package m17
 
 import (
-	"encoding/binary"
-	"errors"
 	"fmt"
-	"io"
-	"log"
 )
 
 const (
 	samplesPerSecond = 24000
-
-// samplesPer40MS   = samplesPerSecond / 1000 * 40
-// samplesPerSymbol = 5
-// symbolsPerSecond = samplesPerSecond / 5
-// symbolsPer40MS   = symbolsPerSecond / 1000 * 40
 )
 
 type Modem interface {
-	io.ReadCloser
-	TransmitPacket(Packet) error
-	TransmitVoiceStream(StreamDatagram) error
+	StartDecoding(sink func(typ uint16, softBits []SoftBit))
 	Start() error
 	Reset() error
-	SetAFC(afc bool) error
-	SetFreqCorrection(corr int16) error
-	SetRXFreq(freq uint32) error
-	SetTXFreq(freq uint32) error
-	SetTXPower(dbm float32) error
+	Close() error
+	TransmitPacket(Packet) error
+	TransmitVoiceStream(StreamDatagram) error
 }
 
-type DummyModem struct {
-	In    io.ReadCloser
-	Out   io.WriteCloser
-	extra []byte
-}
-
-func (m *DummyModem) TransmitPacket(p Packet) error {
-	encoded, err := p.Encode()
-	if err != nil {
-		return err
-	}
-	err = binary.Write(m.Out, binary.LittleEndian, encoded)
-	if err != nil {
-		return fmt.Errorf("failed to send: %w", err)
-	}
-	return nil
-}
-
-func (m *DummyModem) TransmitVoiceStream(sd StreamDatagram) error {
-	return nil
-}
-
-func (m *DummyModem) Read(p []byte) (n int, err error) {
-	l := len(p)
-	el := len(m.extra)
-	log.Printf("[DEBUG] Request to read %d bytes, el: %d", l, el)
-	if el < l {
-		rl := (l - el) / 5
-		if (l-el)%5 > 0 {
-			// make sure we have enough symbols
-			rl++
+func extractPayload(dist float32, typ uint16, symbols []Symbol) ([]Symbol, []SoftBit, float32) {
+	offset := 0
+	for i := range 2 {
+		d, t := syncDistance(symbols, i+1)
+		if t == typ && d < dist {
+			dist = d
+			offset = i + 1
 		}
-		// Get whole symbols
-		if rl%4 > 0 {
-			rl += 4 - rl%4
+	}
+	// skip offset
+	symbols = symbols[offset:]
+	// skip past sync
+	symbols = symbols[16*5:]
+	pld := make([]Symbol, SymbolsPerPayload)
+	for i := range pld {
+		pld[i] = symbols[i*5]
+	}
+	softBits := calcSoftbits(pld)
+	// skip by most, but not all of the payload
+	// if we skip everything we miss the next packet for some reason.
+	symbols = symbols[(SymbolsPerPayload-offset-16)*5:]
+	return symbols, softBits, dist
+}
+
+func generateLSFBits(l LSF) ([]Bit, error) {
+	bits := unpackBits(LSFSyncBytes)
+
+	b, err := ConvolutionalEncode(l.ToBytes(), LSFPuncturePattern, LSFFinalBit)
+	if err != nil {
+		return nil, fmt.Errorf("unable to encode LSF: %w", err)
+	}
+	encodedBits := NewPayloadBits(b)
+	// encodedBits[0:len(b)] = b[:]
+	rfBits := InterleaveBits(encodedBits)
+	rfBits = RandomizeBits(rfBits)
+	// Append LSF to the output
+	bits = append(bits, rfBits[:]...)
+	return bits, nil
+}
+
+func generateLSFSymbols(l *LSF) ([]Symbol, error) {
+	// bits, err := generateLSFBits(l)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("unable to encode LSF: %w", err)
+	// }
+	// return AppendBits(nil, NewPayloadBits(bits)), nil
+	syms := AppendSyncwordSymbols(nil, LSFSync)
+	b, err := ConvolutionalEncode(l.ToBytes(), LSFPuncturePattern, LSFFinalBit)
+	if err != nil {
+		return nil, fmt.Errorf("unable to encode LSF: %w", err)
+	}
+	encodedBits := NewPayloadBits(b)
+	// encodedBits[0:len(b)] = b[:]
+	rfBits := InterleaveBits(encodedBits)
+	rfBits = RandomizeBits(rfBits)
+	// Append LSF to the output
+	syms = AppendBits(syms, rfBits)
+	return syms, err
+}
+
+func generateStreamBits(sd StreamDatagram) ([]Bit, error) {
+	bits := unpackBits(StreamSyncBytes)
+	lich := extractLICH(int((sd.FrameNumber&0x7fff)%6), sd.LSF)
+	encodedLICH := EncodeLICH(lich)
+	lichBits := unpackBits(encodedLICH)
+	b, err := ConvolutionalEncodeStream(lichBits, sd)
+	if err != nil {
+		return nil, fmt.Errorf("encode stream: %w", err)
+	}
+	encodedBits := NewPayloadBits(b)
+	rfBits := InterleaveBits(encodedBits)
+	rfBits = RandomizeBits(rfBits)
+	bits = append(bits, rfBits[:]...)
+	return bits, nil
+}
+
+func generateStreamSymbols(sd StreamDatagram) ([]Symbol, error) {
+	syms := AppendSyncwordSymbols(nil, StreamSync)
+	lich := extractLICH(int((sd.FrameNumber&0x7fff)%6), sd.LSF)
+	encodedLICH := EncodeLICH(lich)
+	lichBits := unpackBits(encodedLICH)
+	b, err := ConvolutionalEncodeStream(lichBits, sd)
+	if err != nil {
+		return syms, fmt.Errorf("encode stream: %w", err)
+	}
+	encodedBits := NewPayloadBits(b)
+	rfBits := InterleaveBits(encodedBits)
+	rfBits = RandomizeBits(rfBits)
+	syms = AppendBits(syms, rfBits)
+	// log.Printf("[DEBUG] len(syms): %d, syms: [% v]", len(syms), syms)
+	return syms, nil
+}
+
+func extractLICH(lichCnt int, lsf *LSF) []byte {
+	lich := lsf.ToBytes()[lichCnt*5 : lichCnt*5+5]
+	return append(lich, byte(lichCnt)<<5)
+}
+
+func unpackBits(in []byte) []Bit {
+	bits := make([]Bit, 8*len(in))
+	for i := range in {
+		for j := range 8 {
+			bits[i*8+j].Set((in[i] >> (7 - j)) & 1)
 		}
-		sBuff := make([]byte, rl)
-		log.Printf("[DEBUG] Attempting to read %d bytes", len(sBuff))
-		nn, err := m.In.Read(sBuff)
-		if err != nil {
-			log.Printf("[ERROR] DummyModem Read failed: %v", err)
-			if nn == 0 {
-				return 0, err
+	}
+	return bits
+}
+func packBits(in []Bit) []byte {
+	// log.Printf("[DEBUG] packBits in: % v", in)
+	bytes := make([]byte, len(in)/8)
+	for i := range bytes {
+		for j := range 8 {
+			if in[8*i+j] {
+				bytes[i] |= 1 << (7 - j)
 			}
 		}
-		log.Printf("[DEBUG] Read %d bytes", nn)
-		if nn%4 != 0 {
-			// panic("handle this!")
-			nn -= nn % 4
-		}
-		sBuff = sBuff[:nn]
-		for i := 0; i < nn; i += 4 {
-			// Repeat each read symbol 5 times
-			for range 5 {
-				m.extra = append(m.extra, sBuff[i:i+4]...)
-			}
-		}
-		l = min(l, len(m.extra))
 	}
-	n = copy(p, m.extra[:l])
-	m.extra = m.extra[l:]
-	log.Printf("[DEBUG] Returning %d bytes", n)
-	return
-}
-
-func (m *DummyModem) Write(buf []byte) (n int, err error) {
-	return m.Out.Write(buf)
-}
-func (m *DummyModem) Reset() error {
-	return nil
-}
-func (m *DummyModem) SetAFC(afc bool) error {
-	return nil
-}
-func (m *DummyModem) SetFreqCorrection(corr int16) error {
-	return nil
-}
-func (m *DummyModem) SetRXFreq(freq uint32) error {
-	return nil
-}
-func (m *DummyModem) SetTXFreq(freq uint32) error {
-	return nil
-}
-func (m *DummyModem) SetTXPower(dbm float32) error {
-	return nil
-}
-func (m *DummyModem) Start() error {
-	return nil
-}
-
-func (m *DummyModem) Close() error {
-	err := m.In.Close()
-	err2 := m.Out.Close()
-	return errors.Join(err, err2)
+	// log.Printf("[DEBUG] packBits out: % 02x", bytes)
+	return bytes
 }

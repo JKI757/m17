@@ -30,11 +30,13 @@ type config struct {
 	logLevel         string
 	logPath          string
 	logRoot          string
-	modemPort        string
-	modemSpeed       int
-	nRSTPin          int
-	paEnablePin      int
-	boot0Pin         int
+	modemType        string
+	modemCfg         *ini.Section
+	// modemPort        string
+	// modemSpeed       int
+	// nRSTPin          int
+	// paEnablePin      int
+	// boot0Pin         int
 	symbolsIn        *os.File
 	symbolsOut       *os.File
 	hostfile         *m17.Hostfile
@@ -63,11 +65,16 @@ func loadConfig(iniFile string, inFile string, outFile string) (config, error) {
 	logLevel := cfg.Section("Log").Key("Level").String()
 	logPath := cfg.Section("Log").Key("Path").String()
 	logRoot := cfg.Section("Log").Key("Root").String()
-	modemPort := cfg.Section("Modem").Key("Port").String()
-	modemSpeed, modemSpeedErr := cfg.Section("Modem").Key("Speed").Int()
-	nRSTPin, nRSTPinErr := cfg.Section("Modem").Key("NRSTPin").Int()
-	paEnablePin, paEnablePinErr := cfg.Section("Modem").Key("PAEnablePin").Int()
-	boot0Pin, boot0PinErr := cfg.Section("Modem").Key("Boot0Pin").Int()
+	var modemType string
+	var modemTypeErr error
+	if !cfg.Section("Modem").HasKey("Type") {
+		cfg.Section("Modem").Key("Type").SetValue("cc1200")
+	}
+	modemType = cfg.Section("Modem").Key("Type").In("BAD", []string{"cc1200", "mmdvm", "dummy"})
+	if modemType == "BAD" {
+		modemTypeErr = fmt.Errorf("bad Modem Type: %s", cfg.Section("Modem").Key("Type").String())
+	}
+	modemCfg := cfg.Section("Modem")
 
 	_, callsignErr := m17.EncodeCallsign(callsign)
 	// TODO: Lots of these validations are CC1200 specific
@@ -142,10 +149,11 @@ func loadConfig(iniFile string, inFile string, outFile string) (config, error) {
 		afcErr,
 		frequencyCorrErr,
 		duplexErr,
-		modemSpeedErr,
-		nRSTPinErr,
-		paEnablePinErr,
-		boot0PinErr,
+		modemTypeErr,
+		// modemSpeedErr,
+		// nRSTPinErr,
+		// paEnablePinErr,
+		// boot0PinErr,
 		callsignErr,
 		reflectorModuleErr,
 		logLevelErr,
@@ -169,11 +177,13 @@ func loadConfig(iniFile string, inFile string, outFile string) (config, error) {
 		logLevel:         logLevel,
 		logPath:          logPath,
 		logRoot:          logRoot,
-		modemPort:        modemPort,
-		modemSpeed:       modemSpeed,
-		nRSTPin:          nRSTPin,
-		paEnablePin:      paEnablePin,
-		boot0Pin:         boot0Pin,
+		modemType:        modemType,
+		modemCfg:         modemCfg,
+		// modemPort:        modemPort,
+		// modemSpeed:       modemSpeed,
+		// nRSTPin:          nRSTPin,
+		// paEnablePin:      paEnablePin,
+		// boot0Pin:         boot0Pin,
 		symbolsIn:        symbolsIn,
 		symbolsOut:       symbolsOut,
 		dashboardLogger:  dashboardLogger,
@@ -213,24 +223,24 @@ func main() {
 
 	var g *Gateway
 	var modem m17.Modem
-	if cfg.modemPort != "" {
-		modem, err = m17.NewCC1200Modem(cfg.modemPort, cfg.nRSTPin, cfg.paEnablePin, cfg.boot0Pin, cfg.modemSpeed)
+	switch cfg.modemType {
+	case "cc1200":
+		modem, err = m17.NewCC1200Modem(cfg.rxFrequency, cfg.txFrequency, cfg.power, cfg.frequencyCorr, cfg.afc, cfg.modemCfg)
 		if err != nil {
-			log.Fatalf("Error connecting to modem: %v", err)
+			log.Fatalf("Error creating CC1200 modem: %v", err)
 		}
-		modem.SetRXFreq(cfg.rxFrequency)
-		modem.SetTXFreq(cfg.txFrequency)
-		modem.SetTXPower(cfg.power)
-		modem.SetFreqCorrection(cfg.frequencyCorr)
-		modem.SetAFC(cfg.afc)
-		log.Printf("[INFO] Connected to modem on %s", cfg.modemPort)
-	} else {
-		m := m17.DummyModem{
+		log.Printf("[INFO] Connected to CC1200 modem on %s", cfg.modemCfg.Key("Port").String())
+	case "mmdvm":
+		modem, err = m17.NewMMDVMModem(cfg.rxFrequency, cfg.txFrequency, cfg.power, cfg.frequencyCorr, cfg.afc, cfg.modemCfg, cfg.duplex)
+		if err != nil {
+			log.Fatalf("Error creating MMDVM modem: %v", err)
+		}
+		log.Printf("[INFO] Connected to MMDVM modem on %s", cfg.modemCfg.Key("Port").String())
+	case "dummy":
+		modem = &m17.DummyModem{
 			In:  cfg.symbolsIn,
 			Out: cfg.symbolsOut,
 		}
-
-		modem = &m
 	}
 
 	if *reset {
@@ -270,7 +280,8 @@ func setupLogging(c config) {
 		Writer:   logWriter,
 	}
 	log.SetOutput(filter)
-	// log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	log.SetFlags(log.LstdFlags | log.Lmicroseconds)
+	// log.SetFlags(0)
 	log.Print("[DEBUG] Debug is on")
 }
 
@@ -349,8 +360,19 @@ func (g *Gateway) SendToNetwork(lsf *m17.LSF, payload []byte, sid, fn uint16) er
 		p := m17.NewPacketFromBytes(append(lsf.ToBytes(), payload...))
 		log.Printf("[DEBUG] send packet to reflector/relay: %v", p)
 		err = g.relay.SendPacket(p)
+		if g.duplex {
+			g.modem.TransmitPacket(p)
+		}
 	} else { // m17.LSFTypeStream
-		err = g.relay.SendStream(*lsf, sid, fn, payload)
+		if payload != nil {
+			// if payload is nil, this is an LSF frame, so there's nothing to send to the reflector
+			err = g.relay.SendStream(lsf, sid, fn, payload)
+		}
+		if g.duplex {
+			sd := m17.NewStreamDatagram(sid, fn, lsf, payload)
+			err2 := g.modem.TransmitVoiceStream(sd)
+			err = errors.Join(err, err2)
+		}
 	}
 	// TODO: Handle error?
 	return err
@@ -358,8 +380,8 @@ func (g *Gateway) SendToNetwork(lsf *m17.LSF, payload []byte, sid, fn uint16) er
 
 func (g *Gateway) Run() {
 	signalChan := make(chan os.Signal, 1)
-	d := m17.NewDecoder(g.dashboardLogger)
-	go d.DecodeSymbols(g.modem, g.SendToNetwork)
+	d := m17.NewDecoder(g.dashboardLogger, g.SendToNetwork)
+	g.modem.StartDecoding(d.DecodeFrame)
 	// Run until we're terminated then clean up
 	log.Print("[DEBUG] client: Waiting for close signal")
 	// wait for a close signal then clean up

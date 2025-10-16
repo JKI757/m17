@@ -128,24 +128,24 @@ func NewLSF(destCall, sourceCall string, t LSFType, dt LSFDataType, can byte) (L
 	return lsf, nil
 }
 
-func NewLSFFromBytes(buf []byte) LSF {
+func NewLSFFromBytes(buf []byte) *LSF {
 	var lsf LSF
 	copy(lsf.Dst[:], buf[dstPos:srcPos])
 	copy(lsf.Src[:], buf[srcPos:typPos])
 	copy(lsf.Type[:], buf[typPos:metaPos])
 	copy(lsf.Meta[:], buf[metaPos:crcPos])
 	copy(lsf.CRC[:], buf[crcPos:crcPos+CRCLen])
-	return lsf
+	return &lsf
 }
 
-func NewLSFFromLSD(lsd []byte) LSF {
+func NewLSFFromLSD(lsd []byte) *LSF {
 	var lsf LSF
 	copy(lsf.Dst[:], lsd[dstPos:srcPos])
 	copy(lsf.Src[:], lsd[srcPos:typPos])
 	copy(lsf.Type[:], lsd[typPos:metaPos])
 	copy(lsf.Meta[:], lsd[metaPos:crcPos])
 	lsf.CalcCRC()
-	return lsf
+	return &lsf
 }
 
 // Convert this LSF to a byte slice suitable for transmission

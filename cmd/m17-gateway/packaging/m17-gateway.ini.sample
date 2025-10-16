@@ -24,8 +24,28 @@ Module=C
 Level=DEBUG
 
 [Modem]
+Type=cc1200
 Port=/dev/ttyAMA0
 Speed=460800
 NRSTPin=21
 PAEnablePin=18
 Boot0Pin=20
+
+# Type=MMDVM
+# Protocol=uart
+# Port=/dev/ttyAMA0
+# Speed=115200
+#
+# TXInvert=1
+# RXInvert=0
+# PTTInvert=0
+# TXDelay=100
+# RXOffset=0
+# TXOffset=0
+# RXLevel=50
+# TXLevel=50
+# RFLevel=100
+# M17TXLevel=50
+# UARTSpeed=115200
+# Protocol=uart
+# UARTPort=/dev/ttyAMA0

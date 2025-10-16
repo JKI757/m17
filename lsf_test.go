@@ -15,11 +15,11 @@ func TestNewLSFFromBytes(t *testing.T) {
 	tests := []struct {
 		name string
 		args args
-		want LSF
+		want *LSF
 	}{
 		{"empty",
 			args{[]byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
-			LSF{
+			&LSF{
 				[6]byte{0, 0, 0, 0, 0, 0},
 				[6]byte{0, 0, 0, 0, 0, 0},
 				[2]byte{0, 0},
@@ -29,7 +29,7 @@ func TestNewLSFFromBytes(t *testing.T) {
 		},
 		{"happy",
 			args{[]byte{0, 0, 1, 138, 146, 174, 0, 0, 75, 19, 209, 6, 0x0f, 0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff}},
-			LSF{
+			&LSF{
 				Dst:  *gog.Must(EncodeCallsign("N1ADJ")),
 				Src:  *gog.Must(EncodeCallsign("N0CALL")),
 				Type: [2]byte{0x0f, 0x7f},
@@ -239,7 +239,7 @@ func TestNewPacketFromBytes(t *testing.T) {
 				0x65, 0x21,
 			}},
 			Packet{
-				LSF: LSF{
+				LSF: &LSF{
 					Dst:  [6]uint8{0x0, 0x0, 0x1, 0x8a, 0x92, 0xae},
 					Src:  [6]uint8{0x0, 0x0, 0x4b, 0x13, 0xd1, 0x6},
 					Type: [2]uint8{0x0, 0x0},
