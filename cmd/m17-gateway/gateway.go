@@ -35,7 +35,6 @@ type config struct {
 	// modemPort        string
 	// modemSpeed       int
 	// nRSTPin          int
-	// paEnablePin      int
 	// boot0Pin         int
 	symbolsIn        *os.File
 	symbolsOut       *os.File
@@ -152,7 +151,6 @@ func loadConfig(iniFile string, inFile string, outFile string) (config, error) {
 		modemTypeErr,
 		// modemSpeedErr,
 		// nRSTPinErr,
-		// paEnablePinErr,
 		// boot0PinErr,
 		callsignErr,
 		reflectorModuleErr,
@@ -182,7 +180,6 @@ func loadConfig(iniFile string, inFile string, outFile string) (config, error) {
 		// modemPort:        modemPort,
 		// modemSpeed:       modemSpeed,
 		// nRSTPin:          nRSTPin,
-		// paEnablePin:      paEnablePin,
 		// boot0Pin:         boot0Pin,
 		symbolsIn:        symbolsIn,
 		symbolsOut:       symbolsOut,

@@ -28,7 +28,6 @@ Type=cc1200
 Port=/dev/ttyAMA0
 Speed=460800
 NRSTPin=21
-PAEnablePin=18
 Boot0Pin=20
 
 # Type=MMDVM

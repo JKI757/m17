@@ -10,16 +10,12 @@ import (
 	"github.com/warthog618/go-gpiocdev"
 )
 
-func (m *CC1200Modem) gpioSetup(nRSTPin, paEnablePin, boot0Pin int) error {
+func (m *CC1200Modem) gpioSetup(nRSTPin, boot0Pin int) error {
 	var err error
 	log.Print("[DEBUG] Setting up GPIO")
 	m.nRST, err = gpiocdev.RequestLine("gpiochip0", nRSTPin, gpiocdev.AsOutput(1))
 	if err != nil {
 		return fmt.Errorf("request nRST line: %w", err)
-	}
-	m.paEnable, err = gpiocdev.RequestLine("gpiochip0", paEnablePin, gpiocdev.AsOutput(0))
-	if err != nil {
-		return fmt.Errorf("request paEnable line: %w", err)
 	}
 	m.boot0, err = gpiocdev.RequestLine("gpiochip0", boot0Pin, gpiocdev.AsOutput(0))
 	if err != nil {

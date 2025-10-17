@@ -67,7 +67,6 @@ type CC1200Modem struct {
 	txTimer               *time.Timer
 	cmdSource             chan byte
 	nRST                  Line
-	paEnable              Line
 	boot0                 Line
 	debugLog              *os.File
 	lastTXData            time.Time
@@ -83,14 +82,12 @@ func NewCC1200Modem(
 	port := modemCfg.Key("Port").String()
 	baudRate, baudRateErr := modemCfg.Key("Speed").Int()
 	nRSTPin, nRSTPinErr := modemCfg.Key("NRSTPin").Int()
-	paEnablePin, paEnablePinErr := modemCfg.Key("PAEnablePin").Int()
 	boot0Pin, boot0PinErr := modemCfg.Key("Boot0Pin").Int()
 
 	var err error
 	err = errors.Join(
 		baudRateErr,
 		nRSTPinErr,
-		paEnablePinErr,
 		boot0PinErr,
 	)
 	if err != nil {
@@ -124,7 +121,7 @@ func NewCC1200Modem(
 		// This is the emulator so don't initialize GPIO
 	} else {
 		log.Printf("[DEBUG] Opening modem")
-		err = ret.gpioSetup(nRSTPin, paEnablePin, boot0Pin)
+		err = ret.gpioSetup(nRSTPin, boot0Pin)
 		if err != nil {
 			return nil, err
 		}
@@ -278,18 +275,6 @@ func (m *CC1200Modem) setNRSTGPIO(set bool) error {
 	return m.nRST.SetValue(0)
 }
 
-func (m *CC1200Modem) setPAEnableGPIO(set bool) error {
-	if m.paEnable == nil {
-		// Emulation mode
-		return nil
-	}
-	log.Printf("[DEBUG] setPAEnableGPIO(%v)", set)
-	if set {
-		return m.paEnable.SetValue(1)
-	}
-	return m.paEnable.SetValue(0)
-}
-
 func (m *CC1200Modem) setBoot0GPIO(set bool) error {
 	if m.boot0 == nil {
 		// Emulation mode
@@ -306,11 +291,10 @@ func (m *CC1200Modem) setBoot0GPIO(set bool) error {
 func (m *CC1200Modem) Reset() error {
 	log.Print("[DEBUG] modem Reset()")
 	err1 := m.setBoot0GPIO(false)
-	err2 := m.setPAEnableGPIO(false)
-	err3 := m.setNRSTGPIO(false)
+	err2 := m.setNRSTGPIO(false)
 	time.Sleep(50 * time.Millisecond)
-	err4 := m.setNRSTGPIO(true)
-	errs := errors.Join(err1, err2, err3, err4)
+	err3 := m.setNRSTGPIO(true)
+	errs := errors.Join(err1, err2, err3)
 	if errs != nil {
 		return fmt.Errorf("modem reset: %w", errs)
 	}
@@ -323,7 +307,6 @@ func (m *CC1200Modem) Close() error {
 	m.stopRX()
 	m.stopTX()
 	m.nRST.Close()
-	m.paEnable.Close()
 	m.boot0.Close()
 	if m.debugLog != nil {
 		m.debugLog.Close()
@@ -479,10 +462,6 @@ func (m *CC1200Modem) startTX() error {
 	if err != nil {
 		return fmt.Errorf("start TX: %w", err)
 	}
-	err = m.setPAEnableGPIO(true)
-	if err != nil {
-		log.Printf("[DEBUG] Start TX PAEnable: %v", err)
-	}
 	m.mutex.Lock()
 	m.txState = txTX
 	m.mutex.Unlock()
@@ -497,10 +476,6 @@ func (m *CC1200Modem) stopTX() {
 	if m.txState == txTX {
 		m.mutex.Unlock()
 		log.Print("[DEBUG] modem stopping TX")
-		err := m.setPAEnableGPIO(false)
-		if err != nil {
-			log.Printf("[DEBUG] End TX PAEnable: %v", err)
-		}
 		m.mutex.Lock()
 		m.txState = txIdle
 	}

@@ -2,6 +2,6 @@
 
 package m17
 
-func (m *CC1200Modem) gpioSetup(_, _, _ int) error {
+func (m *CC1200Modem) gpioSetup(_, _ int) error {
 	return nil
 }
