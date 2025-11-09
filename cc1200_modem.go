@@ -76,6 +76,10 @@ type CC1200Modem struct {
 	boot0                 Line
 	debugLog              *os.File
 	lastTXData            time.Time
+	watchdogTimer         *time.Timer
+	lastActivity          time.Time
+	sampleCount           int // samples received in current watchdog period
+	watchdogPeriod        int // number of samples expected in watchdog period
 }
 
 func NewCC1200Modem(
@@ -102,10 +106,12 @@ func NewCC1200Modem(
 	}
 
 	ret := &CC1200Modem{
-		rxSymbols:  make(chan float32),
-		s2s:        NewSymbolToSample(rrcTaps5, TXSymbolScalingCoeff*transmitGain, false, 5),
-		cmdSource:  make(chan byte),
-		lastTXData: time.Now(),
+		rxSymbols:      make(chan float32, symbolBufSize*10), // 5 seconds of buffer (was unbuffered)
+		s2s:            NewSymbolToSample(rrcTaps5, TXSymbolScalingCoeff*transmitGain, false, 5),
+		cmdSource:      make(chan byte, 256), // Increased from unbuffered to prevent command response drops
+		lastTXData:     time.Now(),
+		lastActivity:   time.Now(),
+		watchdogPeriod: int(30 * samplesPerSecond), // Expect this many samples in 30 seconds
 	}
 	ret.txTimer = time.AfterFunc(txTimeout, func() {
 		log.Printf("[DEBUG] TX timeout")
@@ -115,6 +121,37 @@ func NewCC1200Modem(
 	// Stop it until we transmit
 	ret.txTimer.Stop()
 	ret.txState = txIdle
+
+	// Watchdog timer to detect lockups
+	ret.watchdogTimer = time.AfterFunc(30*time.Second, func() {
+		ret.mutex.Lock()
+		timeSinceActivity := time.Since(ret.lastActivity)
+		samplesReceived := ret.sampleCount
+		expectedSamples := ret.watchdogPeriod
+		txState := ret.txState
+		ret.sampleCount = 0 // Reset counter for next period
+		ret.mutex.Unlock()
+
+		if timeSinceActivity > 30*time.Second {
+			log.Printf("[ERROR] WATCHDOG: No UART activity for %v, resetting modem", timeSinceActivity)
+			ret.Reset()
+			time.Sleep(100 * time.Millisecond)
+			ret.Start()
+		} else if txState == txIdle && samplesReceived < expectedSamples/2 {
+			// In RX mode, we should see constant samples. If we see less than half expected, something is wrong
+			log.Printf("[WARN] WATCHDOG: Only received %d/%d expected samples in 30s (state=%d), possible RX lockup",
+				samplesReceived, expectedSamples, txState)
+			if samplesReceived < expectedSamples/10 {
+				// Very few samples, likely a serious problem
+				log.Printf("[ERROR] WATCHDOG: Critical sample underflow, resetting modem")
+				ret.Reset()
+				time.Sleep(100 * time.Millisecond)
+				ret.Start()
+			}
+		} else {
+			log.Printf("[DEBUG] WATCHDOG: Healthy - %d samples in 30s (state=%d)", samplesReceived, txState)
+		}
+	})
 	fi, err := os.Stat(port)
 	if err != nil {
 		return nil, fmt.Errorf("modem stat: %w", err)
@@ -140,14 +177,14 @@ func NewCC1200Modem(
 			return nil, fmt.Errorf("modem open: %w", err)
 		}
 	}
-	rxSource := make(chan int8, samplesPerSecond)
+	rxSource := make(chan int8, samplesPerSecond*5) // 5 seconds of buffer (was 1 second)
 	ret.rxSymbols, err = ret.rxPipeline(rxSource)
 	if err != nil {
 		return nil, fmt.Errorf("rx pipeline setup: %w", err)
 	}
 	var zmqSource chan byte
 	if zmqPort > 0 {
-		zmqSource = make(chan byte, samplesPerSecond)
+		zmqSource = make(chan byte, samplesPerSecond*5) // 5 seconds of buffer (was 1 second)
 		pub := zmq4.NewPub(context.Background())
 		// defer pub.Close()
 		err := pub.Listen(fmt.Sprintf("tcp://*:%d", zmqPort))
@@ -208,32 +245,55 @@ func (m *CC1200Modem) StartDecoding(sink func(typ uint16, softBits []SoftBit)) {
 
 func (m *CC1200Modem) processReceivedData(rxSource chan int8, zmqSource chan byte) {
 	buf := make([]byte, 1)
+	dropCount := 0
+	totalCount := 0
+	lastLogTime := time.Now()
+
 	for {
 		// log.Printf("[DEBUG] processReceivedData Read()")
 		n, err := m.modem.Read(buf)
 		if n > 0 {
+			// Update activity timestamp for watchdog
+			m.mutex.Lock()
+			m.lastActivity = time.Now()
+			m.mutex.Unlock()
+
+			totalCount++
 			// log.Printf("[DEBUG] processReceivedData read %x, trxState: %d", buf[0], m.trxState.Load())
 			m.mutex.Lock()
 			if m.isCommandWithResponse {
 				m.mutex.Unlock()
 				// log.Printf("[DEBUG] processReceivedData cmdSource <- : %x", buf[0])
-				m.cmdSource <- buf[0]
+				select {
+				case m.cmdSource <- buf[0]:
+					// sent successfully
+				default:
+					// This should never happen - cmdSource should always be drained
+					log.Printf("[ERROR] cmdSource channel full - this will cause lockup! Dropping command response byte: %02x", buf[0])
+				}
 			} else {
 				m.mutex.Unlock()
+				// Use blocking send with timeout instead of dropping data
 				select {
 				case rxSource <- int8(buf[0]):
-					// sent
-					// log.Printf("[DEBUG] processReceivedData rxSource <- : %x", buf[0])
-				default:
-					// pipeline is full, so drop it
-					log.Printf("[DEBUG] processReceivedData dropped rx: %02x", buf[0])
+					// sent successfully
+				case <-time.After(100 * time.Millisecond):
+					// Timeout - buffer is full, log and drop
+					dropCount++
+					if time.Since(lastLogTime) > 1*time.Second {
+						log.Printf("[WARN] Dropped %d/%d samples in last second (%.1f%% loss) - RX pipeline overloaded",
+							dropCount, totalCount, float64(dropCount)/float64(totalCount)*100)
+						dropCount = 0
+						totalCount = 0
+						lastLogTime = time.Now()
+					}
 				}
 				if zmqSource != nil {
 					select {
 					case zmqSource <- buf[0]:
 						// sent
-					default:
-						// pipeline is full, so drop it
+					case <-time.After(10 * time.Millisecond):
+						// ZMQ pipeline full, silently drop to avoid blocking
 					}
 				}
 			}
@@ -364,10 +424,17 @@ func (m *CC1200Modem) Reset() error {
 // Close the modem
 func (m *CC1200Modem) Close() error {
 	log.Print("[DEBUG] modem Close()")
+	if m.watchdogTimer != nil {
+		m.watchdogTimer.Stop()
+	}
 	m.stopRX()
 	m.stopTX()
-	m.nRST.Close()
-	m.boot0.Close()
+	if m.nRST != nil {
+		m.nRST.Close()
+	}
+	if m.boot0 != nil {
+		m.boot0.Close()
+	}
 	if m.debugLog != nil {
 		m.debugLog.Close()
 	}
@@ -523,8 +590,10 @@ func (m *CC1200Modem) startTX() error {
 		return fmt.Errorf("start TX: %w", err)
 	}
 	m.mutex.Lock()
+	oldState := m.txState
 	m.txState = txTX
 	m.mutex.Unlock()
+	log.Printf("[DEBUG] TX state transition: %d -> %d", oldState, txTX)
 	m.txTimer.Reset(txTimeout)
 	return nil
 }
@@ -533,6 +602,7 @@ func (m *CC1200Modem) stopTX() {
 	log.Print("[DEBUG] modem stopTX()")
 	m.mutex.Lock()
 	// Only stop if we've started
+	oldState := m.txState
 	if m.txState == txTX {
 		m.mutex.Unlock()
 		log.Print("[DEBUG] modem stopping TX")
@@ -540,6 +610,7 @@ func (m *CC1200Modem) stopTX() {
 		m.txState = txIdle
 	}
 	m.mutex.Unlock()
+	log.Printf("[DEBUG] TX state transition: %d -> %d", oldState, txIdle)
 	m.txTimer.Stop()
 }
 
@@ -577,8 +648,10 @@ func (m *CC1200Modem) Start() error {
 	// Sometimes we don't go into RX, so try stopping first
 	// m.stopRX()
 	m.mutex.Lock()
+	oldState := m.txState
 	m.txState = txIdle
 	m.mutex.Unlock()
+	log.Printf("[DEBUG] Start() TX state transition: %d -> %d", oldState, txIdle)
 	m.clearResponseBuf()
 	var err error
 	cmd := []byte{cc1200CmdSetRX, 0, 1}
@@ -594,6 +667,7 @@ func (m *CC1200Modem) Start() error {
 func (m *CC1200Modem) stopRX() error {
 	m.mutex.Lock()
 	// Only stop if we've started
+	oldState := m.txState
 	if m.txState == txIdle {
 		m.mutex.Unlock()
 		log.Printf("[DEBUG] stopRX()")
@@ -609,6 +683,7 @@ func (m *CC1200Modem) stopRX() error {
 		m.txState = txIdle
 	}
 	m.mutex.Unlock()
+	log.Printf("[DEBUG] stopRX() TX state transition: %d -> %d", oldState, txIdle)
 	return nil
 }
 func (m *CC1200Modem) setRXFreq(freq uint32) error {
@@ -667,6 +742,12 @@ func (m *CC1200Modem) writeSymbols(symbols []Symbol) error {
 		log.Printf("[DEBUG] Last TX data sent %v ago", since.Round(time.Millisecond))
 	}
 	m.lastTXData = time.Now()
+
+	// Update activity timestamp for watchdog
+	m.mutex.Lock()
+	m.lastActivity = time.Now()
+	m.mutex.Unlock()
+
 	return err
 }
 func (m *CC1200Modem) commandWithErrResponse(cmd []byte) error {
@@ -742,12 +823,37 @@ func (m *CC1200Modem) clearResponseBuf() {
 func (m *CC1200Modem) commandResponse() ([]byte, error) {
 	buf := make([]byte, 2)
 	// log.Printf("[DEBUG] reading 2 bytes")
-	buf[0] = <-m.cmdSource
-	buf[1] = <-m.cmdSource
+
+	// Add timeout to prevent permanent lockup
+	timeout := time.After(5 * time.Second)
+
+	select {
+	case buf[0] = <-m.cmdSource:
+		// Got first byte
+	case <-timeout:
+		return nil, fmt.Errorf("commandResponse timeout waiting for first byte")
+	}
+
+	select {
+	case buf[1] = <-m.cmdSource:
+		// Got second byte
+	case <-timeout:
+		return nil, fmt.Errorf("commandResponse timeout waiting for second byte")
+	}
+
 	// log.Printf("[DEBUG] reading rest: %d", buf[1]-2)
+	if buf[1] < 2 {
+		return nil, fmt.Errorf("invalid response length: %d", buf[1])
+	}
+
 	buf = make([]byte, buf[1]-2)
 	for i := range buf {
-		buf[i] = <-m.cmdSource
+		select {
+		case buf[i] = <-m.cmdSource:
+			// Got data byte
+		case <-timeout:
+			return nil, fmt.Errorf("commandResponse timeout waiting for data byte %d", i)
+		}
 	}
 	// log.Printf("[DEBUG] commandResponse(): % x", buf)
 	return buf, nil
