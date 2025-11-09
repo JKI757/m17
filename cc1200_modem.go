@@ -736,11 +736,18 @@ func (m *CC1200Modem) writeSymbols(symbols []Symbol) error {
 			log.Printf("[DEBUG] Failed to write to debug log: %v", err)
 		}
 	}
-	_, err := m.modem.Write(buf)
+
+	// Graduated TX timing warnings for early detection of issues
 	since := time.Since(m.lastTXData)
-	if since > 100*time.Millisecond {
-		log.Printf("[DEBUG] Last TX data sent %v ago", since.Round(time.Millisecond))
+	if since > 200*time.Millisecond {
+		log.Printf("[WARN] TX timing: %v since last TX (critical)", since.Round(time.Millisecond))
+	} else if since > 160*time.Millisecond {
+		log.Printf("[WARN] TX timing: %v since last TX (warning)", since.Round(time.Millisecond))
+	} else if since > 120*time.Millisecond {
+		log.Printf("[DEBUG] TX timing: %v since last TX (notice)", since.Round(time.Millisecond))
 	}
+
+	_, err := m.modem.Write(buf)
 	m.lastTXData = time.Now()
 
 	// Update activity timestamp for watchdog
@@ -795,6 +802,15 @@ func (m *CC1200Modem) commandWithResponse(cmd []byte) ([]byte, error) {
 	m.mutex.Lock()
 	m.isCommandWithResponse = true
 	m.mutex.Unlock()
+
+	// Use defer to ensure cleanup happens even if we panic or return early
+	defer func() {
+		m.mutex.Lock()
+		m.isCommandWithResponse = false
+		m.mutex.Unlock()
+		m.clearResponseBuf()
+	}()
+
 	err := m.command(cmd)
 	if err != nil {
 		return nil, err
@@ -803,9 +819,6 @@ func (m *CC1200Modem) commandWithResponse(cmd []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("commandWithResponse(): %w", err)
 	}
-	m.mutex.Lock()
-	m.isCommandWithResponse = false
-	m.mutex.Unlock()
 	// log.Printf("[DEBUG] commandWithResponse() received: % 2x", resp)
 	return resp, nil
 }
