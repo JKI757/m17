@@ -10,3 +10,4 @@ cmd/m17-message/m17-message.apk
 cmd/modem-emulator/modem-emulator
 misc/
 .DS_Store
+bin/
