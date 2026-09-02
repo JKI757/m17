@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/jancona/m17"
+	"github.com/jancona/m17/pkg/m17"
 )
 
 var (

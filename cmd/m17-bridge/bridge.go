@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/hashicorp/logutils"
-	"github.com/jancona/m17/server"
+	"github.com/jancona/m17/internal/bridge"
 	"gopkg.in/ini.v1"
 )
 
@@ -121,18 +121,18 @@ func setupLogging(c *config) {
 }
 
 type Bridge struct {
-	server *server.InetServer
+	server *bridge.InetServer
 }
 
 func NewBridge(cfg *config) (*Bridge, error) {
 	var err error
 	ret := Bridge{}
-	modules := map[byte]server.Module{}
-	ret.server = server.NewInetServer(cfg.name, cfg.listenAddress+":"+cfg.listenPort, modules)
+	modules := map[byte]bridge.Module{}
+	ret.server = bridge.NewInetServer(cfg.name, cfg.listenAddress+":"+cfg.listenPort, modules)
 	for k, m := range cfg.modules {
 		switch m.Key("Type").String() {
 		case "Discord":
-			modules[k], err = server.NewDiscordModule(
+			modules[k], err = bridge.NewDiscordModule(
 				k,
 				ret.server,
 				m.Key("ChannelName").String(),
@@ -151,7 +151,7 @@ func NewBridge(cfg *config) (*Bridge, error) {
 			if err != nil {
 				return nil, err
 			}
-			modules[k], err = server.NewIRCModule(
+			modules[k], err = bridge.NewIRCModule(
 				k,
 				ret.server,
 				m.Key("Server").String(),
@@ -164,7 +164,7 @@ func NewBridge(cfg *config) (*Bridge, error) {
 			}
 		case "APRS":
 			staleMinutes := m.Key("StaleMinutes").MustInt(60)
-			modules[k], err = server.NewAPRSModule(
+			modules[k], err = bridge.NewAPRSModule(
 				k,
 				ret.server,
 				m.Key("Server").String(),

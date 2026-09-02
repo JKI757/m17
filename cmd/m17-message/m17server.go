@@ -15,7 +15,7 @@ import (
 	"fyne.io/fyne/v2"
 	"fyne.io/fyne/v2/data/validation"
 	"fyne.io/fyne/v2/widget"
-	"github.com/jancona/m17"
+	"github.com/jancona/m17/pkg/m17"
 )
 
 const (

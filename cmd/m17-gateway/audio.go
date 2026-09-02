@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jancona/m17"
+	"github.com/jancona/m17/pkg/m17"
 )
 
 var speakWords = strings.Split("space a b c d e f g h i j k l m n o p q r s t u v w x y z 0 1 2 3 4 5 6 7 8 9 dash slash dot alpha bravo charlie delta echo foxtrot golf hotel india juliette kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey x-ray yankee zulu m17", " ")

@@ -1,0 +1,518 @@
+// Package codec implements M17 channel coding and symbol framing.
+package codec
+
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"math"
+	"slices"
+	"time"
+)
+
+const (
+	SymbolsPerSyncword = 8   //symbols per syncword
+	SymbolsPerPayload  = 184 //symbols per payload in a frame
+	SymbolsPerFrame    = 192 //symbols per whole 40 ms frame, 40ms * 4800 = 192
+	BytesPerFrame      = SymbolsPerFrame * BitsPerSymbol / 8
+	BitsPerSymbol      = 2
+	BitsPerPayload     = SymbolsPerPayload * BitsPerSymbol
+	FrameTime          = 40 * time.Millisecond
+	FramesPerSecond    = time.Second / FrameTime
+)
+
+const (
+	PacketModeFinalBit = 5 // use 6 bits of final byte
+	LSFFinalBit        = 7 // use entire final byte
+	LSFSync            = uint16(0x55F7)
+	StreamSync         = uint16(0xFF5D)
+	PacketSync         = uint16(0x75FF)
+	BERTSync           = uint16(0xDF55)
+	EOTMarker          = uint16(0x555D)
+)
+
+const (
+	ConvolutionK      = 5                         //constraint length K=5
+	ConvolutionStates = (1 << (ConvolutionK - 1)) //number of states of the convolutional encoder
+)
+
+const (
+	softTrue  = 0xFFFF
+	softMaybe = softTrue / 2
+	softFalse = 0
+)
+
+type Symbol float32
+type SoftBit uint16
+
+func (b SoftBit) String() string {
+	if b == 0 {
+		return "0"
+	} else {
+		return "1"
+	}
+}
+
+var (
+	// TX symbols
+	SymbolMap = []Symbol{+1, +3, -1, -3}
+
+	// symbol list (RX)
+	SymbolList = []Symbol{-3, -1, +1, +3}
+
+	// End of Transmission symbol pattern
+	EOTSymbols = []Symbol{+3, +3, +3, +3, +3, +3, -3, +3}
+
+	// costTable0 = []Symbol{0, 0, 0, 0, 1, 1, 1, 1}
+	// costTable1 = []Symbol{0, 1, 1, 0, 0, 1, 1, 0}
+
+	costTable0 = []SoftBit{softFalse, softFalse, softFalse, softFalse, softTrue, softTrue, softTrue, softTrue}
+	costTable1 = []SoftBit{softFalse, softTrue, softTrue, softFalse, softFalse, softTrue, softTrue, softFalse}
+)
+
+// Preamble type (0 for LSF, 1 for BERT).
+type Preamble byte
+
+const (
+	lsfPreamble Preamble = iota
+	bertPreamble
+)
+
+const (
+	LSFPreamble  = lsfPreamble
+	BERTPreamble = bertPreamble
+)
+
+type Bit bool
+
+func (b *Bit) Byte() byte {
+	if *b {
+		return 1
+	}
+	return 0
+}
+func (b *Bit) Set(by byte) {
+	*b = by != 0
+}
+
+type PayloadBits [BitsPerPayload]Bit
+
+func NewPayloadBits(bs []Bit) *PayloadBits {
+	var bits PayloadBits
+	copy(bits[:], bs)
+	return &bits
+}
+
+type PuncturePattern []Bit
+
+var LSFPuncturePattern = PuncturePattern{
+	true, true, false, true, true, true, false, true,
+	true, true, false, true, true, true, false, true,
+	true, true, false, true, true, true, false, true,
+	true, true, false, true, true, true, false, true,
+	true, true, false, true, true, true, false, true,
+	true, true, false, true, true, true, false, true,
+	true, true, false, true, true, true, false, true,
+	true, true, false, true, true,
+}
+
+var StreamPuncturePattern = PuncturePattern{true, true, true, true, true, true, true, true, true, true, true, false}
+
+var PacketPuncturePattern = PuncturePattern{true, true, true, true, true, true, true, false}
+
+var (
+	LSFPreambleSymbols = []float64{+3, -3, +3, -3, +3, -3, +3, -3}
+
+	LSFSyncSymbols    = []float64{+3, +3, +3, +3, -3, -3, +3, -3} // 0x55F7
+	ExtLSFSyncSymbols = append(LSFPreambleSymbols, LSFSyncSymbols...)
+	StreamSyncSymbols = []float64{-3, -3, -3, -3, +3, +3, -3, +3} // 0xFF5D
+	PacketSyncSymbols = []float64{+3, -3, +3, +3, -3, -3, -3, -3} // 0x75FF
+	BERTSyncSymbols   = []float64{-3, +3, -3, -3, +3, +3, +3, +3} // 0xDF55
+	EOTMarkerSymbols  = []float64{+3, +3, +3, +3, +3, +3, -3, +3} // 0x555D
+)
+
+// Calculate distance between recent samples and sync patterns.
+// sps is the number of samples per symbol (5 for CC1200, 1 for SX1255).
+func syncDistance(symbols []Symbol, offset int, sps int) (float32, uint16) {
+	var lsf,
+		pkt, pkte, pkta, pktb,
+		str, stre, stra, strb,
+		eote, eot float64
+
+	frameStride := SymbolsPerFrame * sps // distance between consecutive sync words
+
+	for i, s := range symbols[offset : 16*sps+offset] {
+		if i%sps == 0 {
+			v := float64(s)
+			sym := i / sps
+			lsf += (v - ExtLSFSyncSymbols[sym]) * (v - ExtLSFSyncSymbols[sym])
+			eot += (v - EOTMarkerSymbols[sym%8]) * (v - EOTMarkerSymbols[sym%8])
+
+			if sym > 7 {
+				stra += (v - StreamSyncSymbols[sym-8]) * (v - StreamSyncSymbols[sym-8])
+				pkta += (v - PacketSyncSymbols[sym-8]) * (v - PacketSyncSymbols[sym-8])
+			}
+		}
+	}
+
+	for i, s := range symbols[frameStride+offset : frameStride+16*sps+offset] {
+		if i%sps == 0 {
+			v := float64(s)
+			sym := i / sps
+			if sym > 7 {
+				strb += (v - StreamSyncSymbols[sym-8]) * (v - StreamSyncSymbols[sym-8])
+				eote += (v - EOTMarkerSymbols[sym-8]) * (v - EOTMarkerSymbols[sym-8])
+				pktb += (v - PacketSyncSymbols[sym-8]) * (v - PacketSyncSymbols[sym-8])
+			}
+		}
+	}
+	lsf = math.Sqrt(lsf)
+	pkt = math.Sqrt(pkta + pktb)
+	pkte = math.Sqrt(pkta + eote)
+	eot = math.Sqrt(eot)
+	str = math.Sqrt(stra + strb)
+	stre = math.Sqrt(stra + eote)
+
+	switch min(lsf, pkt, pkte, str, stre, eot) {
+	case lsf:
+		return float32(lsf), LSFSync
+	case pkt:
+		return float32(pkt), PacketSync
+	case pkte:
+		return float32(pkte), PacketSync
+	case eot:
+		return float32(eot), EOTMarker
+	case stre:
+		return float32(stre), StreamSync
+	default:
+		return float32(str), StreamSync
+	}
+}
+
+// SyncDistance finds the nearest M17 synchronization pattern.
+func SyncDistance(symbols []Symbol, offset int, sps int) (float32, uint16) {
+	return syncDistance(symbols, offset, sps)
+}
+
+func EuclNorm(s1, s2 []Symbol, n int) float64 {
+	var ret float64
+
+	for i := range n {
+		ret += float64((s1[i] - s2[i]) * (s1[i] - s2[i]))
+	}
+
+	return math.Sqrt(ret)
+}
+
+// AppendPreamble generates symbol stream for a preamble.
+func AppendPreamble(out []Symbol, typ Preamble) []Symbol {
+	if typ == bertPreamble {
+		for i := 0; i < SymbolsPerFrame/2; i++ {
+			out = append(out, -3.0, +3.0)
+		}
+	} else {
+		for i := 0; i < SymbolsPerFrame/2; i++ {
+			out = append(out, +3.0, -3.0)
+		}
+	}
+	return out
+}
+
+// AppendSyncwordSymbols generates the symbol stream for a syncword.
+func AppendSyncwordSymbols(out []Symbol, syncword uint16) []Symbol {
+	for i := 0; i < SymbolsPerSyncword*2; i += 2 {
+		out = append(out, SymbolMap[(syncword>>(14-i))&3])
+	}
+	return out
+}
+
+var interleaveSequence = [BitsPerPayload]uint16{
+	0, 137, 90, 227, 180, 317, 270, 39, 360, 129, 82, 219, 172, 309, 262, 31,
+	352, 121, 74, 211, 164, 301, 254, 23, 344, 113, 66, 203, 156, 293, 246, 15,
+	336, 105, 58, 195, 148, 285, 238, 7, 328, 97, 50, 187, 140, 277, 230, 367,
+	320, 89, 42, 179, 132, 269, 222, 359, 312, 81, 34, 171, 124, 261, 214, 351,
+	304, 73, 26, 163, 116, 253, 206, 343, 296, 65, 18, 155, 108, 245, 198, 335,
+	288, 57, 10, 147, 100, 237, 190, 327, 280, 49, 2, 139, 92, 229, 182, 319,
+	272, 41, 362, 131, 84, 221, 174, 311, 264, 33, 354, 123, 76, 213, 166, 303,
+	256, 25, 346, 115, 68, 205, 158, 295, 248, 17, 338, 107, 60, 197, 150, 287,
+	240, 9, 330, 99, 52, 189, 142, 279, 232, 1, 322, 91, 44, 181, 134, 271,
+	224, 361, 314, 83, 36, 173, 126, 263, 216, 353, 306, 75, 28, 165, 118, 255,
+	208, 345, 298, 67, 20, 157, 110, 247, 200, 337, 290, 59, 12, 149, 102, 239,
+	192, 329, 282, 51, 4, 141, 94, 231, 184, 321, 274, 43, 364, 133, 86, 223,
+	176, 313, 266, 35, 356, 125, 78, 215, 168, 305, 258, 27, 348, 117, 70, 207,
+	160, 297, 250, 19, 340, 109, 62, 199, 152, 289, 242, 11, 332, 101, 54, 191,
+	144, 281, 234, 3, 324, 93, 46, 183, 136, 273, 226, 363, 316, 85, 38, 175,
+	128, 265, 218, 355, 308, 77, 30, 167, 120, 257, 210, 347, 300, 69, 22, 159,
+	112, 249, 202, 339, 292, 61, 14, 151, 104, 241, 194, 331, 284, 53, 6, 143,
+	96, 233, 186, 323, 276, 45, 366, 135, 88, 225, 178, 315, 268, 37, 358, 127,
+	80, 217, 170, 307, 260, 29, 350, 119, 72, 209, 162, 299, 252, 21, 342, 111,
+	64, 201, 154, 291, 244, 13, 334, 103, 56, 193, 146, 283, 236, 5, 326, 95,
+	48, 185, 138, 275, 228, 365, 318, 87, 40, 177, 130, 267, 220, 357, 310, 79,
+	32, 169, 122, 259, 212, 349, 302, 71, 24, 161, 114, 251, 204, 341, 294, 63,
+	16, 153, 106, 243, 196, 333, 286, 55, 8, 145, 98, 235, 188, 325, 278, 47,
+}
+
+// Interleave payload bits.
+func InterleaveBits(in *PayloadBits) *PayloadBits {
+	var out PayloadBits
+	for i := 0; i < SymbolsPerPayload*2; i++ {
+		out[i] = in[interleaveSequence[i]]
+	}
+	return &out
+}
+func DeinterleaveSoftBits(softBits []SoftBit) []SoftBit {
+	var dSoftBits []SoftBit
+	for i := range SymbolsPerPayload * 2 {
+		dSoftBits = append(dSoftBits, softBits[interleaveSequence[i]])
+	}
+	return dSoftBits
+}
+
+var randomizeSeq = []byte{
+	0xD6, 0xB5, 0xE2, 0x30, 0x82, 0xFF, 0x84, 0x62, 0xBA, 0x4E,
+	0x96, 0x90, 0xD8, 0x98, 0xDD, 0x5D, 0x0C, 0xC8, 0x52, 0x43,
+	0x91, 0x1D, 0xF8, 0x6E, 0x68, 0x2F, 0x35, 0xDA, 0x14, 0xEA,
+	0xCD, 0x76, 0x19, 0x8D, 0xD5, 0x80, 0xD1, 0x33, 0x87, 0x13,
+	0x57, 0x18, 0x2D, 0x29, 0x78, 0xC3,
+}
+
+func RandomizeBits(bits *PayloadBits) *PayloadBits {
+	for i := 0; i < len(bits); i++ {
+		if ((randomizeSeq[i/8] >> (7 - (i % 8))) & 1) != 0 {
+			// flip bit
+			bits[i] = !bits[i]
+		}
+	}
+	return bits
+}
+func DerandomizeSoftBits(softBits []SoftBit) []SoftBit {
+	for i := 0; i < len(softBits); i++ {
+		if (randomizeSeq[i/8]>>(7-(i%8)))&1 != 0 { //soft XOR. flip soft bit if "1"
+			softBits[i] = softTrue - softBits[i]
+		}
+	}
+	return softBits
+}
+
+func AppendBits(out []Symbol, data *PayloadBits) []Symbol {
+	for i := 0; i < SymbolsPerPayload; i++ { //40ms * 4800 - 8 (syncword)
+		d := 0
+		if data[2*i+1] {
+			d += 1
+		}
+		if data[2*i] {
+			d += 2
+		}
+		out = append(out, SymbolMap[d])
+	}
+	return out
+}
+
+// Generate symbol stream for the End of Transmission marker.
+func AppendEOT(out []Symbol) []Symbol {
+	for i := range SymbolsPerFrame {
+		out = append(out, EOTSymbols[i%8])
+	}
+	return out
+}
+
+// ConvolutionalEncode takes a slice of bytes and a puncture pattern and returns an
+// a slice of bool with each element representing one bit in the encoded message
+//
+// in 				Input bytes
+// puncturePattern 	the puncture pattern to use
+// finalBit 		The last bit of the final byte to encode. A number between 0 and 7. (That is, the number of bits from the last byte to use minus one.)
+func ConvolutionalEncode(in []byte, puncturePattern PuncturePattern, finalBit byte) ([]Bit, error) {
+	if len(in) == 0 {
+		return nil, errors.New("empty input not allowed")
+	}
+	if finalBit > 7 {
+		return nil, errors.New("finalBits must be between 0 and 7")
+	}
+	unpackedBits := make([]byte, 4) // 4 leading bits
+	for i, byt := range in {
+		for j := 0; j < 8; j++ {
+			if i < len(in)-1 || j <= int(finalBit) {
+				unpackedBits = append(unpackedBits, (byt>>(7-j))&1)
+			}
+		}
+	}
+	// Add 4 tail bits
+	for i := 0; i < 4; i++ {
+		unpackedBits = append(unpackedBits, 0)
+	}
+	p := 0
+	out := make([]Bit, 0, 2*len(unpackedBits))
+	// log.Printf("[DEBUG] len(in): %d, len(unpackedBits): %d, len(out): %d", len(in), len(unpackedBits), len(out))
+	ppLen := 1
+	if puncturePattern != nil {
+		ppLen = len(puncturePattern)
+	}
+	// pb := 0
+	for i := range len(unpackedBits) - 4 {
+		if puncturePattern == nil || puncturePattern[p] {
+			g2 := (unpackedBits[i+4] + unpackedBits[i+1] + unpackedBits[i+0]) % 2
+			out = append(out, g2 != 0)
+		}
+
+		p++
+		p %= ppLen
+
+		if puncturePattern == nil || puncturePattern[p] {
+			g2 := (unpackedBits[i+4] + unpackedBits[i+3] + unpackedBits[i+2] + unpackedBits[i+0]) % 2
+			out = append(out, g2 != 0)
+		}
+
+		p++
+		p %= ppLen
+	}
+	// log.Printf("[DEBUG] len(out): %d", len(out))
+
+	return out, nil
+}
+
+// ConvolutionalEncodeStream encodes one stream frame without transport types.
+func ConvolutionalEncodeStream(lichBits []Bit, frameNumber uint16, payload [16]byte) ([]Bit, error) {
+	frame, err := binary.Append(nil, binary.BigEndian, frameNumber)
+	if err != nil {
+		return nil, fmt.Errorf("append frame number: %w", err)
+	}
+	frame = append(frame, payload[:]...)
+	frameBits, err := ConvolutionalEncode(frame, StreamPuncturePattern, 7)
+	bits := append(lichBits, frameBits...)
+
+	return bits, err
+}
+
+type ViterbiDecoder struct {
+	history []uint16
+
+	prevMetrics     []uint32
+	currMetrics     []uint32
+	prevMetricsData []uint32
+	currMetricsData []uint32
+}
+
+func (v *ViterbiDecoder) Init(l int) {
+	v.history = make([]uint16, l/2+l%2)
+	v.prevMetrics = make([]uint32, ConvolutionStates)
+	v.currMetrics = make([]uint32, ConvolutionStates)
+	v.prevMetricsData = make([]uint32, ConvolutionStates)
+	v.currMetricsData = make([]uint32, ConvolutionStates)
+}
+
+func (v *ViterbiDecoder) DecodePunctured(puncturedSoftBits []SoftBit, puncturePattern PuncturePattern) ([]byte, int) {
+	// log.Printf("[DEBUG] DecodePunctured len(puncturedSoftBits): %d, len(puncturePattern): %d", len(puncturedSoftBits), len(puncturePattern))
+	// log.Printf("[DEBUG] puncturedSoftBits: %#v, puncturePattern: %#v", puncturedSoftBits, puncturePattern)
+	// unpuncture input
+	var softBits = make([]SoftBit, 2*len(puncturedSoftBits))
+
+	p := 0
+	u := 0
+	for i := 0; i < len(puncturedSoftBits); {
+		if puncturePattern[p] {
+			softBits[u] = puncturedSoftBits[i]
+			i++
+		} else {
+			softBits[u] = softMaybe
+		}
+		u++
+		p++
+		p %= len(puncturePattern)
+	}
+	softBits = softBits[:u+u%2]
+
+	out, e := v.decode(softBits)
+	// log.Printf("[DEBUG] DecodePunctured: e: %d", e)
+	return out, e
+}
+
+func (v *ViterbiDecoder) decode(softBits []SoftBit) ([]byte, int) {
+	// log.Printf("[DEBUG] decode() len(softBits): %d, softBits: %#v", len(softBits), softBits)
+	v.Init(len(softBits))
+	pos := 0
+	for i := 0; i < len(softBits); i += 2 {
+		sb0 := softBits[i]
+		sb1 := softBits[i+1]
+		// log.Printf("[DEBUG] decode i: %d", i)
+		v.decodeBit(sb0, sb1, pos)
+		pos++
+	}
+
+	out, e := v.chainback(pos, len(softBits)/2)
+	// log.Printf("[DEBUG] decode() return len(out): %d, out: %#v, e: %d", len(out), out, e)
+	return out, e
+}
+
+func (v *ViterbiDecoder) decodeBit(sb0, sb1 SoftBit, pos int) {
+	for i := 0; i < ConvolutionStates/2; i++ {
+		metric := absDiff(costTable0[i], sb0) + absDiff(costTable1[i], sb1)
+		// log.Printf("[DEBUG] i: %d, sb0: %f, sb1: %f, metric: %f", i, sb0, sb1, metric)
+
+		m0 := v.prevMetrics[i] + metric
+		m1 := v.prevMetrics[i+ConvolutionStates/2] + (0x1FFFE - metric)
+
+		m2 := v.prevMetrics[i] + (0x1FFFE - metric)
+		m3 := v.prevMetrics[i+ConvolutionStates/2] + metric
+
+		i0 := 2 * i
+		i1 := i0 + 1
+
+		if m0 >= m1 {
+			v.history[pos] |= (1 << i0)
+			v.currMetrics[i0] = m1
+		} else {
+			v.history[pos] &= ^(1 << i0)
+			v.currMetrics[i0] = m0
+		}
+
+		if m2 >= m3 {
+			v.history[pos] |= (1 << i1)
+			v.currMetrics[i1] = m3
+		} else {
+			v.history[pos] &= ^(1 << i1)
+			v.currMetrics[i1] = m2
+		}
+	}
+
+	//swap
+	tmp := make([]uint32, ConvolutionStates)
+	for i := range ConvolutionStates {
+		tmp[i] = v.currMetrics[i]
+	}
+	for i := range ConvolutionStates {
+		v.currMetrics[i] = v.prevMetrics[i]
+		v.prevMetrics[i] = tmp[i]
+	}
+}
+
+func absDiff(v1, v2 SoftBit) uint32 {
+	if v1 > v2 {
+		return uint32(v1 - v2)
+	}
+	return uint32(v2 - v1)
+}
+
+func (v *ViterbiDecoder) chainback(pos, l int) ([]byte, int) {
+	state := byte(0)
+	bitPos := l + 4
+	out := make([]byte, (l-1)/8+1)
+
+	for pos > 0 {
+		bitPos--
+		pos--
+		bit := v.history[pos] & (1 << (state >> 4))
+		// log.Printf("[DEBUG] chainback pos: %d, bitPos: %d, v.history[pos]: %x, 1 << (state >> 4)): %x, bit: %x", pos, bitPos, v.history[pos], (1 << (state >> 4)), bit)
+		state >>= 1
+		if bit != 0 && bitPos/8 < len(out) {
+			// log.Printf("[DEBUG] chainback pos: %d, bitPos: %d", pos, bitPos)
+			state |= 0x80
+			out[bitPos/8] |= 1 << (7 - (bitPos % 8))
+		}
+	}
+
+	cost := int(slices.Min(v.prevMetrics) / softMaybe / 2)
+	// log.Printf("[DEBUG] chainback(%d, %d) cost: %d", pos, l, cost)
+
+	return out, cost
+}

@@ -11,7 +11,7 @@ import (
 	"os/signal"
 	"time"
 
-	"github.com/jancona/m17"
+	"github.com/jancona/m17/pkg/m17"
 )
 
 const IDENT_STR = "CC1200-HAT 420-450 MHz\nFW v1.1 by Wojciech SP5WWP"

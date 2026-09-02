@@ -116,4 +116,43 @@ This program emulates the [CC1200 Modem firmware](https://github.com/M17-Project
 
 ## Library
 
-The root directory of the project contains the Go library (`github.com/jancona/m17`) used to implement the M17 protocol parts of the tools. It's pretty rough right now, but I hope to improve it and make it more general and useful over time.
+The reusable M17 library is under [`pkg`](./pkg/). Use the narrow protocol
+package when an application only needs M17 wire data:
+
+```go
+import "github.com/jancona/m17/pkg/protocol"
+```
+
+`pkg/m17` remains as the compatibility import for the current full public API:
+
+```go
+import "github.com/jancona/m17/pkg/m17"
+```
+
+The focused public packages are:
+
+- `pkg/protocol` for callsigns, LSFs, packets, and CRC values.
+- `pkg/codec` for symbol framing and error-correction coding.
+- `pkg/inet` for M17 Internet clients and stream datagrams.
+
+These packages do not import GPIO, SPI, ALSA, serial-port, APRS, Discord, IRC,
+gateway, or GUI code.
+
+Hardware drivers and bridge integrations are implementation details. They are
+under [`internal`](./internal/) and are available only to programs in this
+module. Command packages in [`cmd`](./cmd/) only load configuration, create
+dependencies, and start applications.
+
+## Package boundaries
+
+- `pkg/protocol` contains M17 packet and frame values.
+- `pkg/codec` contains radio symbol and error-correction code.
+- `pkg/inet` contains the M17 Internet client.
+- `pkg/hostfile` contains reflector host-file loading.
+- `internal/drivers` contains hardware-specific modem drivers.
+- `internal/bridge` contains APRS, IRC, Discord, and bridge-server behavior.
+- `internal/gateway` contains gateway service behavior.
+
+Packages under `pkg` must not import command, bridge, or hardware code.
+Commands are composition roots. They create configuration, drivers, and other
+dependencies, then pass typed values to internal services.

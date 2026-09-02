@@ -15,7 +15,9 @@ import (
 	"time"
 
 	"github.com/hashicorp/logutils"
-	"github.com/jancona/m17"
+	drivers "github.com/jancona/m17/internal/drivers"
+	service "github.com/jancona/m17/internal/gateway"
+	"github.com/jancona/m17/pkg/m17"
 	"gopkg.in/ini.v1"
 	// _ "net/http/pprof"
 )
@@ -129,6 +131,13 @@ func loadConfig(iniFile string, inFile string, outFile string) (config, error) {
 	if logLevel != "ERROR" && logLevel != "INFO" && logLevel != "DEBUG" {
 		logLevelErr = fmt.Errorf("configured Log Level must be one of ERROR, INFO or DEBUG")
 	}
+	serviceConfigErr := (service.Config{
+		Callsign:        callsign,
+		ReflectorName:   reflectorName,
+		ReflectorModule: reflectorModule,
+		Duplex:          duplex,
+		AudioDir:        audioDir,
+	}).Validate()
 
 	var symbolsInErr, symbolsOutErr error
 	symbolsIn := os.Stdin
@@ -172,6 +181,7 @@ func loadConfig(iniFile string, inFile string, outFile string) (config, error) {
 		callsignErr,
 		reflectorModuleErr,
 		logLevelErr,
+		serviceConfigErr,
 		symbolsInErr,
 		symbolsOutErr,
 		dashboardLogErr,
@@ -236,25 +246,24 @@ func main() {
 	// 	fmt.Println(http.ListenAndServe(":6060", nil))
 	// }()
 
-	var g *Gateway
 	var modem m17.Modem
 	switch cfg.modemType {
 	case "cc1200":
 		fallthrough
 	case "cc1200v2":
-		modem, err = m17.NewCC1200Modem(cfg.rxFrequency, cfg.txFrequency, int8(cfg.power), cfg.frequencyCorr, cfg.afc, cfg.modemCfg)
+		modem, err = drivers.NewCC1200Modem(cfg.rxFrequency, cfg.txFrequency, int8(cfg.power), cfg.frequencyCorr, cfg.afc, cfg.modemCfg)
 		if err != nil {
 			log.Fatalf("Error creating CC1200 modem: %v", err)
 		}
 		log.Printf("[INFO] Connected to CC1200 modem on %s", cfg.modemCfg.Key("Port").String())
 	case "mmdvm":
-		modem, err = m17.NewMMDVMModem(cfg.rxFrequency, cfg.txFrequency, cfg.power, cfg.frequencyCorr, cfg.afc, cfg.modemCfg, cfg.duplex)
+		modem, err = drivers.NewMMDVMModem(cfg.rxFrequency, cfg.txFrequency, cfg.power, cfg.frequencyCorr, cfg.afc, cfg.modemCfg, cfg.duplex)
 		if err != nil {
 			log.Fatalf("Error creating MMDVM modem: %v", err)
 		}
 		log.Printf("[INFO] Connected to MMDVM modem on %s", cfg.modemCfg.Key("Port").String())
 	case "sx1255":
-		modem, err = m17.NewSX1255Modem(cfg.rxFrequency, cfg.txFrequency, cfg.frequencyCorr, cfg.modemCfg)
+		modem, err = drivers.NewSX1255Modem(cfg.rxFrequency, cfg.txFrequency, cfg.frequencyCorr, cfg.modemCfg)
 		if err != nil {
 			log.Fatalf("Error creating SX1255 modem: %v", err)
 		}
@@ -275,13 +284,38 @@ func main() {
 		}
 		os.Exit(0)
 	}
-	log.Printf("[DEBUG] Creating gateway cfg: %#v, modem %#v", cfg, modem)
-	g, err = NewGateway(cfg, modem)
-	if err != nil {
-		log.Fatalf("Error creating Gateway: %v", err)
+	hosts := map[string]m17.Host{}
+	if cfg.hostfile != nil {
+		hosts = cfg.hostfile.Hosts
 	}
-	defer g.Close()
-	g.Run()
+	overrideHosts := map[string]m17.Host{}
+	if cfg.overrideHostfile != nil {
+		overrideHosts = cfg.overrideHostfile.Hosts
+	}
+	gatewayService, err := service.New(service.Config{
+		Callsign:        cfg.callsign,
+		ReflectorName:   cfg.defaultReflector,
+		ReflectorModule: cfg.defaultModule,
+		Duplex:          cfg.duplex,
+		AudioDir:        cfg.audioDir,
+	}, service.Dependencies{
+		Modem:         modem,
+		Hosts:         hosts,
+		OverrideHosts: overrideHosts,
+		Logger:        m17.NewDashboardLogger(cfg.dashboardLogger),
+	})
+	if err != nil {
+		log.Fatalf("Create gateway service: %v", err)
+	}
+	defer gatewayService.Close()
+	if err := gatewayService.Start(); err != nil {
+		log.Fatalf("Start gateway service: %v", err)
+	}
+	signalChan := make(chan os.Signal, 1)
+	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
+	log.Print("[DEBUG] gateway: Waiting for close signal")
+	<-signalChan
+	log.Print("[DEBUG] gateway: Received an interrupt, stopping")
 }
 
 func setupLogging(c config) {
@@ -603,8 +637,7 @@ func (g *Gateway) receivedRFPacket(lsf m17.LSF, payload []byte, ber float64) err
 	return err
 }
 
-func (g *Gateway) Run() {
-	signalChan := make(chan os.Signal, 1)
+func (g *Gateway) Start() {
 	d := m17.NewDecoder(
 		g.receivedRFLSF,
 		g.receivedRFStreamFrame,
@@ -613,18 +646,6 @@ func (g *Gateway) Run() {
 		g.receivedRFPacket,
 	)
 	g.modem.StartDecoding(d.DecodeFrame)
-	// Run until we're terminated then clean up
-	log.Print("[DEBUG] client: Waiting for close signal")
-	// wait for a close signal then clean up
-	cleanupDone := make(chan struct{})
-	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-signalChan
-		log.Print("[DEBUG] client: Received an interrupt, stopping...")
-		// Cleanup goes here
-		close(cleanupDone)
-	}()
-	<-cleanupDone
 }
 
 func (g *Gateway) Close() {
